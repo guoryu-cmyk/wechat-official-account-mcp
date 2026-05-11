@@ -3,6 +3,67 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { InitTransportServerFunction } from '../shared/index.js';
 import { logger } from '../../utils/logger.js';
 
+type SseRequestLike = {
+  query?: Record<string, unknown>;
+  headers?: Record<string, unknown>;
+};
+
+const MESSAGE_ENDPOINT = '/messages';
+const TOKEN_QUERY_KEY = 'token';
+
+function getSingleQueryValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function getBearerToken(authHeader: unknown): string | undefined {
+  if (typeof authHeader !== 'string') {
+    return undefined;
+  }
+
+  const [scheme, token] = authHeader.split(' ');
+  if (scheme !== 'Bearer' || !token) {
+    return undefined;
+  }
+
+  return token;
+}
+
+function getSseQueryToken(req: SseRequestLike): string | undefined {
+  return getSingleQueryValue(req.query?.[TOKEN_QUERY_KEY]);
+}
+
+/**
+ * 生成 MCP SSE 握手时广播给客户端的消息回传地址。
+ * 当用户通过 ChatGPT 的“未授权”模式传入 URL token 时，需要把 token
+ * 继续放进 /messages 地址里，否则 ChatGPT 后续 POST 调用会丢失鉴权信息。
+ */
+export function buildSseMessageEndpoint(token?: string): string {
+  if (!token) {
+    return MESSAGE_ENDPOINT;
+  }
+
+  const searchParams = new URLSearchParams({ [TOKEN_QUERY_KEY]: token });
+  return `${MESSAGE_ENDPOINT}?${searchParams.toString()}`;
+}
+
+/**
+ * 校验 SSE 与消息回传请求是否具备访问权限。
+ * 未配置 MCP_AUTH_TOKEN 时保持历史兼容，允许本地/内网无认证访问；公网部署必须配置该环境变量。
+ */
+export function isSseRequestAuthorized(
+  req: SseRequestLike,
+  expectedToken = process.env.MCP_AUTH_TOKEN,
+): boolean {
+  if (!expectedToken) {
+    return true;
+  }
+
+  const queryToken = getSseQueryToken(req);
+  const bearerToken = getBearerToken(req.headers?.authorization);
+
+  return queryToken === expectedToken || bearerToken === expectedToken;
+}
+
 export const initSSEServer: InitTransportServerFunction = async (
   getNewServer,
   options,
@@ -16,6 +77,12 @@ export const initSSEServer: InitTransportServerFunction = async (
 
   const app = express();
   app.use(express.json());
+  const transports = new Map<string, SSEServerTransport>();
+  const expectedToken = process.env.MCP_AUTH_TOKEN;
+
+  if (!expectedToken) {
+    logger.warn('MCP_AUTH_TOKEN is not set; SSE transport will accept unauthenticated requests.');
+  }
 
   // 错误处理中间件
   app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -27,17 +94,21 @@ export const initSSEServer: InitTransportServerFunction = async (
   });
 
   app.get('/sse', async (req, res) => {
-    try {
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': process.env.CORS_ORIGIN || '*',
-        'Access-Control-Allow-Headers': 'Cache-Control'
-      });
+    let transport: SSEServerTransport | undefined;
 
-      // Create SSE transport
-      const transport = new SSEServerTransport("/messages", res);
+    try {
+      if (!isSseRequestAuthorized(req, expectedToken)) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+      res.setHeader('Access-Control-Allow-Headers', 'Cache-Control, Content-Type, Authorization');
+
+      // 为每个 SSE 连接创建独立 transport，后续 /messages 通过 sessionId 找回它。
+      const messageEndpoint = buildSseMessageEndpoint(getSseQueryToken(req));
+      transport = new SSEServerTransport(messageEndpoint, res);
+      transports.set(transport.sessionId, transport);
       const mcpServer = await getNewServer(options);
 
       await mcpServer.connect(transport);
@@ -45,7 +116,7 @@ export const initSSEServer: InitTransportServerFunction = async (
       req.on('close', async () => {
         try {
           logger.info('SSE connection closed, cleaning up...');
-          // 这里可以添加清理逻辑
+          transports.delete(transport.sessionId);
         } catch (error) {
           logger.error('Error during SSE cleanup:', error);
         }
@@ -55,9 +126,41 @@ export const initSSEServer: InitTransportServerFunction = async (
         logger.error('SSE request error:', error);
       });
     } catch (error) {
+      if (transport) {
+        transports.delete(transport.sessionId);
+      }
+
       logger.error('Error in SSE handler:', error);
       if (!res.headersSent) {
         res.status(500).json({ error: 'Failed to establish SSE connection' });
+      }
+    }
+  });
+
+  app.post('/messages', async (req, res) => {
+    try {
+      if (!isSseRequestAuthorized(req, expectedToken)) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      const sessionId = getSingleQueryValue(req.query.sessionId);
+      if (!sessionId) {
+        res.status(400).send('Missing sessionId');
+        return;
+      }
+
+      const transport = transports.get(sessionId);
+      if (!transport) {
+        res.status(400).send('No transport found for sessionId');
+        return;
+      }
+
+      await transport.handlePostMessage(req, res, req.body);
+    } catch (error) {
+      logger.error('Error in SSE message handler:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to handle SSE message' });
       }
     }
   });
