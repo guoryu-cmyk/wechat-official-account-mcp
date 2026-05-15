@@ -1,6 +1,6 @@
 {
   "name": "wechat-official-account-mcp",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "type": "module",
   "description": "微信公众号 MCP 服务 - 为 AI 应用提供完整的微信公众号 API 集成（15个工具模块）",
   "keywords": [
@@ -41,7 +41,7 @@
     "prepublishOnly": "npm run build:prod",
     "lint": "eslint .",
     "check": "tsc --noEmit",
-    "test": "npm run build:prod && node test-tools.js && node test-sse-auth.js",
+    "test": "npm run build:prod && node test-tools.js && node test-sse-auth.js && node test-storage-config.js",
     "clean": "node -e \"const fs=require('fs');['dist/src','dist/api'].forEach(p=>fs.rmSync(p,{recursive:true,force:true}))\"",
     "pack:test": "./scripts/pack-test.sh",
     "pack:dry": "npm pack --dry-run",

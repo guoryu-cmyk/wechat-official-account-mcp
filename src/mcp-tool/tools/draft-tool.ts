@@ -5,12 +5,44 @@ import { draftArticleSchema, mediaIdSchema } from '../../utils/validation.js';
 
 // 草稿工具参数 Schema
 const draftToolSchema = z.object({
-  action: z.enum(['add', 'get', 'delete', 'list', 'count']),
+  action: z.enum(['add', 'update', 'get', 'delete', 'list', 'count']),
   mediaId: mediaIdSchema.optional(),
   articles: z.array(draftArticleSchema).optional(),
+  article: draftArticleSchema.optional(),
+  index: z.number().int().min(0).optional(),
+  truncateContent: z.boolean().optional(),
   offset: z.number().int().min(0).optional(),
   count: z.number().int().min(1).max(20).optional(),
 });
+
+function toWechatDraftArticle(article: any): Record<string, unknown> {
+  // 微信草稿接口使用下划线字段；MCP 入参保持当前项目已有的驼峰字段，统一在这里转换。
+  return {
+    title: article.title,
+    author: article.author || '',
+    digest: article.digest || '',
+    content: article.content,
+    content_source_url: article.contentSourceUrl || '',
+    thumb_media_id: article.thumbMediaId,
+    show_cover_pic: article.showCoverPic || 0,
+    need_open_comment: article.needOpenComment || 0,
+    only_fans_can_comment: article.onlyFansCanComment || 0,
+  };
+}
+
+/**
+ * 格式化草稿正文。
+ *
+ * 默认返回微信接口给出的完整 HTML 内容，保证迁移、备份、二次编辑等场景不会丢正文。
+ * 只有调用方明确要求预览时，才截断为 100 个字符，避免旧的摘要展示场景刷屏。
+ */
+function formatDraftContent(content: string, truncateContent = false): string {
+  if (!truncateContent || content.length <= 100) {
+    return content;
+  }
+
+  return `${content.substring(0, 100)}...`;
+}
 
 /**
  * 草稿工具核心处理逻辑
@@ -21,6 +53,9 @@ async function handleDraftOperations(
   params: {
     mediaId?: string;
     articles?: any[];
+    article?: any;
+    index?: number;
+    truncateContent?: boolean;
     offset?: number;
     count?: number;
   },
@@ -36,17 +71,7 @@ async function handleDraftOperations(
 
       try {
         const result = await apiClient.post('/cgi-bin/draft/add', {
-          articles: articles.map((article: any) => ({
-            title: article.title,
-            author: article.author || '',
-            digest: article.digest || '',
-            content: article.content,
-            content_source_url: article.contentSourceUrl || '',
-            thumb_media_id: article.thumbMediaId,
-            show_cover_pic: article.showCoverPic || 0,
-            need_open_comment: article.needOpenComment || 0,
-            only_fans_can_comment: article.onlyFansCanComment || 0,
-          }))
+          articles: articles.map(toWechatDraftArticle)
         }) as any;
 
         return {
@@ -60,8 +85,37 @@ async function handleDraftOperations(
       }
     }
 
+    case 'update': {
+      const { mediaId, article, index = 0 } = params;
+
+      if (!mediaId) {
+        throw new Error('草稿ID不能为空');
+      }
+
+      if (!article) {
+        throw new Error('文章内容不能为空');
+      }
+
+      try {
+        await apiClient.post('/cgi-bin/draft/update', {
+          media_id: mediaId,
+          index,
+          articles: toWechatDraftArticle(article),
+        }) as any;
+
+        return {
+          content: [{
+            type: 'text',
+            text: `草稿修改成功！\n草稿ID: ${mediaId}\n文章位置: ${index}`,
+          }],
+        };
+      } catch (error) {
+        throw new Error(`修改草稿失败: ${error instanceof Error ? error.message : '未知错误'}`);
+      }
+    }
+
     case 'get': {
-      const { mediaId } = params;
+      const { mediaId, truncateContent = false } = params;
 
       if (!mediaId) {
         throw new Error('草稿ID不能为空');
@@ -77,7 +131,7 @@ async function handleDraftOperations(
           `标题: ${item.title}\n` +
           `作者: ${item.author || '未设置'}\n` +
           `摘要: ${item.digest || '无'}\n` +
-          `内容: ${item.content.substring(0, 100)}${item.content.length > 100 ? '...' : ''}\n` +
+          `内容: ${formatDraftContent(item.content, truncateContent)}\n` +
           `原文链接: ${item.content_source_url || '无'}\n` +
           `封面图ID: ${item.thumb_media_id}\n` +
           `显示封面: ${item.show_cover_pic ? '是' : '否'}\n`
@@ -176,9 +230,9 @@ async function handleDraftTool(context: WechatToolContext): Promise<WechatToolRe
 
   try {
     const validatedArgs = draftToolSchema.parse(args);
-    const { action, mediaId, articles, offset, count } = validatedArgs;
+    const { action, mediaId, articles, article, index, truncateContent, offset, count } = validatedArgs;
 
-    return await handleDraftOperations(action, { mediaId, articles, offset, count }, apiClient);
+    return await handleDraftOperations(action, { mediaId, articles, article, index, truncateContent, offset, count }, apiClient);
   } catch (error) {
     logger.error('Draft tool error:', error);
     return {
@@ -195,10 +249,29 @@ async function handleDraftTool(context: WechatToolContext): Promise<WechatToolRe
  * MCP草稿工具处理器 (直接参数)
  */
 async function handleDraftMcpTool(args: unknown, apiClient: WechatApiClient): Promise<WechatToolResult> {
-  const { action, mediaId, articles, offset = 0, count = 20 } = args as any;
+  const { action, mediaId, articles, article, index, truncateContent, offset = 0, count = 20 } = args as any;
 
   try {
-    return await handleDraftOperations(action, { mediaId, articles, offset, count }, apiClient);
+    const validatedArgs = draftToolSchema.parse({
+      action,
+      mediaId,
+      articles,
+      article,
+      index,
+      truncateContent,
+      offset,
+      count,
+    });
+
+    return await handleDraftOperations(validatedArgs.action, {
+      mediaId: validatedArgs.mediaId,
+      articles: validatedArgs.articles,
+      article: validatedArgs.article,
+      index: validatedArgs.index,
+      truncateContent: validatedArgs.truncateContent,
+      offset: validatedArgs.offset,
+      count: validatedArgs.count,
+    }, apiClient);
   } catch (error) {
     logger.error('Draft MCP tool error:', error);
     return {
@@ -222,12 +295,16 @@ export const draftTool: WechatToolDefinition = {
     properties: {
       action: {
         type: 'string',
-        enum: ['add', 'get', 'delete', 'list', 'count'],
+        enum: ['add', 'update', 'get', 'delete', 'list', 'count'],
         description: '操作类型',
       },
       mediaId: {
         type: 'string',
         description: '草稿 Media ID',
+      },
+      truncateContent: {
+        type: 'boolean',
+        description: '获取草稿时是否将正文截断为 100 字预览；默认 false，返回全文',
       },
     },
     required: ['action'],
@@ -242,8 +319,8 @@ export const draftMcpTool: McpTool = {
   name: 'wechat_draft',
   description: '管理微信公众号草稿',
   inputSchema: {
-    action: z.enum(['add', 'get', 'delete', 'list', 'count']).describe('操作类型：add(创建), get(获取), delete(删除), list(列表), count(统计)'),
-    mediaId: z.string().optional().describe('草稿 Media ID（获取、删除时必需）'),
+    action: z.enum(['add', 'update', 'get', 'delete', 'list', 'count']).describe('操作类型：add(创建), update(修改), get(获取), delete(删除), list(列表), count(统计)'),
+    mediaId: z.string().optional().describe('草稿 Media ID（获取、修改、删除时必需）'),
     articles: z.array(z.object({
       title: z.string().describe('文章标题'),
       author: z.string().optional().describe('作者'),
@@ -255,6 +332,9 @@ export const draftMcpTool: McpTool = {
       needOpenComment: z.number().optional().describe('是否开启评论'),
       onlyFansCanComment: z.number().optional().describe('是否仅粉丝可评论'),
     })).optional().describe('文章列表（创建时必需）'),
+    article: draftArticleSchema.optional().describe('文章内容（修改单篇草稿时必需）'),
+    index: z.number().int().min(0).optional().describe('文章位置（修改草稿时使用，首篇为0，默认0）'),
+    truncateContent: z.boolean().optional().describe('获取草稿时是否将正文截断为 100 字预览；默认 false，返回全文'),
     offset: z.number().optional().describe('偏移量（列表时使用）'),
     count: z.number().optional().describe('数量（列表时使用）'),
   },

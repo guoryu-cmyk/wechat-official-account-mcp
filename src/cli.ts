@@ -41,16 +41,19 @@ program
   .option('-p, --port <port>', 'Port for SSE mode', '3000')
   .action(async (options) => {
     const { appId, appSecret, mode, port } = options;
+    const resolvedAppId = appId || process.env.WECHAT_APP_ID;
+    const resolvedAppSecret = appSecret || process.env.WECHAT_APP_SECRET;
 
-    if (!appId || !appSecret) {
+    if (!resolvedAppId || !resolvedAppSecret) {
       logger.error('App ID and App Secret are required');
       logger.info('Usage: npx wechat-mcp mcp -a <app_id> -s <app_secret>');
+      logger.info('Or set WECHAT_APP_ID and WECHAT_APP_SECRET environment variables');
       process.exit(1);
     }
 
     const serverOptions: McpServerOptions = {
-      appId,
-      appSecret,
+      appId: resolvedAppId,
+      appSecret: resolvedAppSecret,
       mode: mode as 'stdio' | 'sse',
       port: port
     };
@@ -58,7 +61,7 @@ program
     try {
       logger.info(`Starting WeChat MCP Server in ${mode} mode...`);
       // 只记录 App ID 的前8个字符,避免泄露完整凭证
-      logger.info(`App ID: ${appId.substring(0, 8)}...`);
+      logger.info(`App ID: ${resolvedAppId.substring(0, 8)}...`);
 
       await initMcpServerWithTransport(serverOptions);
     } catch (error) {
@@ -88,6 +91,7 @@ program
     console.log('  -s, --app-secret <appSecret> WeChat App Secret');
     console.log('  -m, --mode <mode>           Transport mode (stdio|sse), default: stdio');
     console.log('  -p, --port <port>           Port for SSE mode, default: 3000');
+    console.log('  Environment fallback: WECHAT_APP_ID, WECHAT_APP_SECRET');
     console.log('');
     console.log('Examples:');
     console.log('  npx wechat-mcp mcp -a wx1234567890 -s abcdef1234567890');

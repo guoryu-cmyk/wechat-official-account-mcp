@@ -20,7 +20,11 @@ export class StorageManager {
   private secretKey: string | undefined;
 
   constructor() {
-    this.dbPath = path.join(__dirname, '../../data/wechat-mcp.db');
+    // 生产环境全局安装时 __dirname 会落到 /usr/local/lib/node_modules 下；
+    // 优先使用 DB_PATH 可以把 SQLite 数据库固定到可写的数据目录，避免服务用户写系统目录失败。
+    this.dbPath = process.env.DB_PATH
+      ? path.resolve(process.env.DB_PATH)
+      : path.join(__dirname, '../../data/wechat-mcp.db');
     this.secretKey = process.env.WECHAT_MCP_SECRET_KEY;
   }
 
