@@ -4,6 +4,47 @@ import { logger } from '../../utils/logger.js';
 
 // 验证 Schema
 const menuIdSchema = z.number().int().positive('菜单ID必须为正整数');
+const menuButtonTypeSchema = z.enum([
+  'click',
+  'view',
+  'miniprogram',
+  'scancode_push',
+  'scancode_waitmsg',
+  'pic_sysphoto',
+  'pic_photo_or_album',
+  'pic_weixin',
+  'location_select',
+  'media_id',
+  'view_limited',
+  'article_id',
+  'article_view_limited',
+]);
+const menuSubButtonSchema = z.object({
+  type: menuButtonTypeSchema.optional(),
+  name: z.string().min(1, '菜单名称不能为空'),
+  key: z.string().optional(),
+  url: z.string().optional(),
+  mediaId: z.string().optional(),
+  media_id: z.string().optional(),
+  appid: z.string().optional(),
+  pagepath: z.string().optional(),
+  article_id: z.string().optional(),
+});
+const menuButtonSchema = menuSubButtonSchema.extend({
+  sub_button: z.array(menuSubButtonSchema).optional(),
+});
+const menuDataSchema = z.object({
+  button: z.array(menuButtonSchema).min(1, '菜单按钮不能为空'),
+  matchrule: z.object({
+    tag_id: z.number().int().optional(),
+    sex: z.string().optional(),
+    country: z.string().optional(),
+    province: z.string().optional(),
+    city: z.string().optional(),
+    client_platform_type: z.number().int().optional(),
+    language: z.string().optional(),
+  }).optional(),
+});
 
 export const menuMcpTool: McpTool = {
   name: 'wechat_menu',
@@ -17,7 +58,7 @@ export const menuMcpTool: McpTool = {
       'delete_conditional',
       'get_selfmenu_info'
     ]),
-    menuData: z.any().optional(), // 复杂的菜单结构
+    menuData: menuDataSchema.optional(), // 复杂的菜单结构
     menuId: menuIdSchema.optional(),
   },
   handler: async (params: unknown, apiClient: WechatApiClient): Promise<WechatToolResult> => {

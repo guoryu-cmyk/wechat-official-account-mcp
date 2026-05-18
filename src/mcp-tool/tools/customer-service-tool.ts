@@ -5,6 +5,12 @@ import { logger } from '../../utils/logger.js';
 // 验证 Schema
 const openIdSchema = z.string().min(1, 'OpenID不能为空');
 const mediaIdSchema = z.string().min(1, 'MediaID不能为空');
+const customerServiceArticleSchema = z.object({
+  title: z.string().min(1, '文章标题不能为空'),
+  description: z.string().optional(),
+  url: z.string().url('URL格式不正确'),
+  picurl: z.string().url('图片URL格式不正确').optional(),
+});
 
 export const customerServiceMcpTool: McpTool = {
   name: 'wechat_customer_service',
@@ -28,7 +34,7 @@ export const customerServiceMcpTool: McpTool = {
     description: z.string().optional(),
     musicUrl: z.string().url().optional(),
     hqMusicUrl: z.string().url().optional(),
-    articles: z.array(z.any()).optional(), // 图文消息
+    articles: z.array(customerServiceArticleSchema).optional(), // 图文消息
     startTime: z.number().int().positive().optional(),
     endTime: z.number().int().positive().optional(),
     msgId: z.number().int().optional(),
