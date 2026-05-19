@@ -1,6 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import express from 'express';
 import multer from 'multer';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { InitTransportServerFunction } from '../shared/index.js';
 import { logger } from '../../utils/logger.js';
 import {
@@ -21,9 +24,11 @@ type SseRequestLike = {
 };
 
 const MESSAGE_ENDPOINT = '/messages';
+const STREAMABLE_HTTP_ENDPOINT = '/mcp';
 const IMAGE_UPLOAD_ENDPOINT = '/upload-image';
 const TOKEN_QUERY_KEY = 'token';
 const DEFAULT_SSE_JSON_BODY_LIMIT = '16mb';
+const MCP_SESSION_ID_HEADER = 'mcp-session-id';
 
 function getSingleQueryValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -65,6 +70,10 @@ function getImageUploadTicketToken(req: SseRequestLike): string | undefined {
   );
 }
 
+function getMcpSessionId(req: SseRequestLike): string | undefined {
+  return getSingleHeaderValue(req.headers?.[MCP_SESSION_ID_HEADER]);
+}
+
 /**
  * 设置 SSE 相关 HTTP 端点的跨域响应头。
  *
@@ -73,8 +82,12 @@ function getImageUploadTicketToken(req: SseRequestLike): string | undefined {
  */
 function setSseCorsHeaders(res: express.Response): void {
   res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-  res.setHeader('Access-Control-Allow-Headers', `Cache-Control, Content-Type, Authorization, ${IMAGE_UPLOAD_TICKET_HEADER}`);
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    `Cache-Control, Content-Type, Authorization, ${IMAGE_UPLOAD_TICKET_HEADER}, Mcp-Session-Id, mcp-session-id, Last-Event-ID`,
+  );
+  res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
 }
 
 /**
@@ -154,6 +167,7 @@ export const initSSEServer: InitTransportServerFunction = async (
   const app = express();
   app.use(express.json({ limit: getSseJsonBodyLimit() }));
   const transports = new Map<string, SSEServerTransport>();
+  const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
   const expectedToken = process.env.MCP_AUTH_TOKEN;
   const imageUpload = multer({
     storage: multer.memoryStorage(),
@@ -176,7 +190,101 @@ export const initSSEServer: InitTransportServerFunction = async (
     }
   });
 
+  /**
+   * 现代 MCP 客户端优先使用 Streamable HTTP。保留 /mcp 作为标准入口，同时让
+   * /sse 的 POST/带 Mcp-Session-Id 的 GET 也走这里，避免用户在 ChatGPT 里
+   * 已经配置了旧 /sse 地址时，客户端用新协议调用工具却拿到 SSE 握手帧。
+   */
+  const handleStreamableHttpRequest = async (req: express.Request, res: express.Response) => {
+    let transport: StreamableHTTPServerTransport | undefined;
+
+    try {
+      if (!isSseRequestAuthorized(req, expectedToken)) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      setSseCorsHeaders(res);
+
+      const sessionId = getMcpSessionId(req);
+      if (sessionId) {
+        transport = streamableTransports.get(sessionId);
+      }
+
+      if (!transport && req.method === 'POST' && !sessionId && isInitializeRequest(req.body)) {
+        transport = new StreamableHTTPServerTransport({
+          // 使用服务端生成的随机 session，后续请求通过 Mcp-Session-Id 头找回同一个连接状态。
+          sessionIdGenerator: () => randomUUID(),
+          // 对当前工具场景直接返回 JSON 更稳定，避免部分代理把长连接误判为超时。
+          enableJsonResponse: true,
+          onsessioninitialized: initializedSessionId => {
+            if (transport) {
+              streamableTransports.set(initializedSessionId, transport);
+              logger.info('Streamable HTTP MCP session initialized', { sessionId: initializedSessionId });
+            }
+          },
+          onsessionclosed: closedSessionId => {
+            streamableTransports.delete(closedSessionId);
+            logger.info('Streamable HTTP MCP session closed', { sessionId: closedSessionId });
+          },
+        });
+
+        transport.onclose = () => {
+          if (transport?.sessionId) {
+            streamableTransports.delete(transport.sessionId);
+          }
+        };
+        transport.onerror = error => {
+          logger.error('Streamable HTTP transport error:', error);
+        };
+
+        const mcpServer = await getNewServer(options);
+        await mcpServer.connect(transport);
+      }
+
+      if (!transport) {
+        res.status(400).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32000,
+            message: 'Bad Request: No valid MCP session. Send initialize first, then reuse Mcp-Session-Id.',
+          },
+          id: null,
+        });
+        return;
+      }
+
+      await transport.handleRequest(req, res, req.method === 'POST' ? req.body : undefined);
+    } catch (error) {
+      logger.error('Error in Streamable HTTP handler:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32603,
+            message: 'Internal server error',
+          },
+          id: null,
+        });
+      }
+    }
+  };
+
+  app.options([STREAMABLE_HTTP_ENDPOINT, '/sse', MESSAGE_ENDPOINT, IMAGE_UPLOAD_ENDPOINT], (_req, res) => {
+    setSseCorsHeaders(res);
+    res.status(204).send();
+  });
+
+  app.all(STREAMABLE_HTTP_ENDPOINT, handleStreamableHttpRequest);
+  app.post('/sse', handleStreamableHttpRequest);
+  app.delete('/sse', handleStreamableHttpRequest);
+
   app.get('/sse', async (req, res) => {
+    if (getMcpSessionId(req)) {
+      await handleStreamableHttpRequest(req, res);
+      return;
+    }
+
     let transport: SSEServerTransport | undefined;
 
     try {
@@ -217,11 +325,6 @@ export const initSSEServer: InitTransportServerFunction = async (
         res.status(500).json({ error: 'Failed to establish SSE connection' });
       }
     }
-  });
-
-  app.options(IMAGE_UPLOAD_ENDPOINT, (_req, res) => {
-    setSseCorsHeaders(res);
-    res.status(204).send();
   });
 
   app.post(IMAGE_UPLOAD_ENDPOINT, (req, res) => {

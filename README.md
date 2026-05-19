@@ -61,6 +61,8 @@ npx wechat-official-account-mcp mcp -a wx1234567890abcdef -s your_app_secret_her
 
 ### SSE 模式图片上传流程
 
+> 兼容说明：SSE 模式现在同时暴露现代 MCP Streamable HTTP 入口 `POST /mcp`。如果客户端已经配置了旧地址 `https://<domain>/sse`，服务端也会兼容 `POST /sse` 的 Streamable HTTP 调用；旧版 `GET /sse` + `POST /messages` 仍可继续使用。公网部署建议优先给 ChatGPT/Codex 等现代客户端配置 `https://<domain>/mcp?token=<MCP_AUTH_TOKEN>`，如果客户端仍缓存旧 `/sse` 地址，删除后重新添加连接。
+
 远程 SSE 模式下，`wechat_upload_img` 的 `filePath` 必须是 MCP 服务器上的路径，不能直接读取用户电脑本地文件。为了避免把图片转成超长 base64 后在 AI/MCP JSON 参数链路中被截断，且兼容 ChatGPT 执行环境无法对外 curl 的情况，推荐优先调用 MCP 工具 `wechat_stage_image_upload` 分片上传图片。
 
 `wechat_stage_image_upload` 不需要外部 HTTP 网络，完整流程如下：
