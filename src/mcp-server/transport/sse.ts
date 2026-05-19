@@ -168,7 +168,7 @@ export const initSSEServer: InitTransportServerFunction = async (
   app.use(express.json({ limit: getSseJsonBodyLimit() }));
   const transports = new Map<string, SSEServerTransport>();
   const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
-  const expectedToken = process.env.MCP_AUTH_TOKEN;
+  const expectedToken = options.mcpAuthToken || process.env.MCP_AUTH_TOKEN;
   const imageUpload = multer({
     storage: multer.memoryStorage(),
     limits: {

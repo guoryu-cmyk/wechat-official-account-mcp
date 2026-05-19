@@ -198,11 +198,82 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 - `-s, --app-secret <appSecret>`: 微信公众号 AppSecret（必需）
 - `-m, --mode <mode>`: 传输模式，支持 `stdio`（默认）和 `sse`
 - `-p, --port <port>`: SSE 模式下的端口号（默认 3000）
+- `-c, --config <path>`: 统一 MCP 配置文件路径
+- `--account <name>`: 配置文件中的公众号 profile 名称
+- `--mcp-token <token>`: 当前 MCP 实例访问 token
+- `--public-base-url <url>`: 当前 MCP 实例公网基础地址
+- `--db-path <path>`: 当前公众号独立 SQLite 数据库路径
+- `--image-upload-dir <path>`: 当前公众号独立图片临时目录
 - `-h, --help`: 显示帮助信息
 
 环境变量（常用）：
+- `WECHAT_MCP_CONFIG`: 统一配置文件路径
+- `WECHAT_MCP_ACCOUNT`: 默认启动的公众号 profile 名称
 - `CORS_ORIGIN`: 逗号分隔的跨域来源白名单（示例：`https://a.example.com,https://b.example.com`）
 - `WECHAT_MCP_SECRET_KEY`: 开启敏感字段加密存储（AES），设置即启用
+
+### 多公众号统一配置文件
+
+一个配置文件可以放多个公众号 profile。实际运行时仍建议“一个 profile 一个 MCP 进程”，每个进程使用独立端口、数据库、临时目录和 MCP token，避免多个公众号之间串数据。
+
+```json
+{
+  "defaultAccount": "justin",
+  "accounts": {
+    "justin": {
+      "wechat": {
+        "appId": "wx_your_justin_appid",
+        "appSecret": "your_justin_appsecret"
+      },
+      "mcp": {
+        "mode": "sse",
+        "port": 3000,
+        "authToken": "justin-mcp-token",
+        "publicBaseUrl": "https://justin.guoairong.site",
+        "uploadCurlResolve": "justin.guoairong.site:443:110.42.214.78"
+      },
+      "storage": {
+        "dbPath": "./data/justin/wechat-mcp.db",
+        "imageUploadDir": "./temp/justin"
+      }
+    },
+    "zhandaren": {
+      "wechat": {
+        "appId": "wx_your_zhandaren_appid",
+        "appSecret": "your_zhandaren_appsecret"
+      },
+      "mcp": {
+        "mode": "sse",
+        "port": 3001,
+        "authToken": "zhandaren-mcp-token",
+        "publicBaseUrl": "https://zhandaren.guoairong.site",
+        "uploadCurlResolve": "zhandaren.guoairong.site:443:110.42.214.78"
+      },
+      "storage": {
+        "dbPath": "./data/zhandaren/wechat-mcp.db",
+        "imageUploadDir": "./temp/zhandaren"
+      }
+    }
+  }
+}
+```
+
+启动示例：
+
+```bash
+wechat-mcp mcp --config ~/wechat-official-account-mcp/accounts.json --account justin
+wechat-mcp mcp --config ~/wechat-official-account-mcp/accounts.json --account zhandaren
+```
+
+字段说明：
+- `wechat.appId` / `wechat.appSecret`: 当前公众号的 AppID 和 AppSecret
+- `mcp.authToken`: ChatGPT/Codex 连接 MCP 时使用的访问 token，对应旧的 `MCP_AUTH_TOKEN`
+- `mcp.publicBaseUrl`: 当前 profile 对外访问的域名，对应旧的 `MCP_PUBLIC_BASE_URL`
+- `mcp.uploadCurlResolve`: 可选 DNS 绕过提示，对应旧的 `MCP_UPLOAD_CURL_RESOLVE`
+- `storage.dbPath`: 当前公众号独立 SQLite 数据库，对应旧的 `DB_PATH`
+- `storage.imageUploadDir`: 当前公众号独立临时上传目录，对应旧的 `WECHAT_MCP_IMAGE_UPLOAD_DIR`
+
+命令行参数优先级最高，其次是配置文件，最后是环境变量。也可以用 `WECHAT_MCP_CONFIG` 和 `WECHAT_MCP_ACCOUNT` 指定默认配置文件与 profile。
 
 ## 🔧 MCP 工具列表
 

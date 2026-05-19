@@ -41,7 +41,7 @@
     "prepublishOnly": "npm run build:prod",
     "lint": "eslint .",
     "check": "tsc --noEmit",
-    "test": "npm run build:prod && node test-tools.js && node test-sse-auth.js && node test-sse-image-upload.js && node test-storage-config.js",
+    "test": "npm run build:prod && node test-tools.js && node test-sse-auth.js && node test-sse-image-upload.js && node test-storage-config.js && node test-mcp-config.js",
     "clean": "node -e \"const fs=require('fs');['dist/src','dist/api'].forEach(p=>fs.rmSync(p,{recursive:true,force:true}))\"",
     "pack:test": "./scripts/pack-test.sh",
     "pack:dry": "npm pack --dry-run",

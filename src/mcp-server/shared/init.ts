@@ -2,12 +2,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WechatMcpTool } from '../../mcp-tool/index.js';
 import { AuthManager } from '../../auth/auth-manager.js';
 import { initStdioServer, initSSEServer } from '../transport/index.js';
-import { McpServerOptions } from './types';
+import { applyMcpRuntimeEnvironment } from '../../config/mcp-config.js';
+import { McpServerOptions } from './types.js';
 import { logger } from '../../utils/logger.js';
 import { readFileSync } from 'fs';
 
 export async function initWechatMcpServer(options: McpServerOptions) {
-  const { appId, appSecret, tools } = options;
+  const { appId, appSecret, tools, wechatToken, encodingAESKey } = options;
 
   if (!appId || !appSecret) {
     logger.error('Error: Missing App Credentials');
@@ -44,7 +45,12 @@ export async function initWechatMcpServer(options: McpServerOptions) {
   // 创建认证管理器
   const authManager = new AuthManager();
   await authManager.initialize();
-  await authManager.setConfig({ appId, appSecret });
+  await authManager.setConfig({
+    appId,
+    appSecret,
+    token: wechatToken,
+    encodingAESKey,
+  });
 
   // 创建微信MCP工具
   const wechatTool = new WechatMcpTool(authManager);
@@ -60,6 +66,10 @@ export async function initWechatMcpServer(options: McpServerOptions) {
 
 export async function initMcpServerWithTransport(options: McpServerOptions) {
   const { mode = 'stdio' } = options;
+
+  // 统一配置文件会把 DB_PATH、MCP_AUTH_TOKEN 等进程级配置收敛到 options。
+  // 这里启动前同步到环境变量，兼容存储层和上传工具里已有的读取方式。
+  applyMcpRuntimeEnvironment(options);
 
   const getNewServer = async (commonOptions: McpServerOptions) => {
     const { mcpServer } = await initWechatMcpServer({ ...options, ...commonOptions });
