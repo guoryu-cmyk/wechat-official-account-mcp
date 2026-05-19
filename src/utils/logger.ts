@@ -24,15 +24,81 @@ const SENSITIVE_FIELDS = [
 ];
 
 /**
- * 脱敏处理 - 隐藏敏感信息的中间部分
+ * 判断字段名是否属于敏感信息。
+ *
+ * 日志里既要能排查问题，又不能泄露密钥。这里按字段名做第一层判断：
+ * 只有明确命中敏感字段时才整体隐藏，避免把 fileName、format、errmsg
+ * 这类排障信息也误伤成 ***。
+ */
+function isSensitiveFieldName(key: string): boolean {
+  const lowerKey = key.toLowerCase();
+  return SENSITIVE_FIELDS.some(field => lowerKey.includes(field.toLowerCase()));
+}
+
+/**
+ * 对敏感值做稳定脱敏。
+ *
+ * 长值保留头尾便于确认“是不是同一个值”，短值直接隐藏，避免在日志中泄露凭证。
+ */
+function maskSensitiveValue(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return sanitizeValue(value);
+  }
+
+  if (value.length > 16) {
+    return `${value.substring(0, 8)}...${value.substring(value.length - 4)}`;
+  }
+
+  return '***';
+}
+
+/**
+ * 清理字符串中可能混入的敏感片段。
+ *
+ * 非敏感字段的字符串需要保留可读性，但 URL、Authorization 或 JSON 字符串中
+ * 仍可能带 access_token/app_secret，所以这里做第二层兜底脱敏。
+ */
+function sanitizeString(value: string): string {
+  return value
+    .replace(/(access_token=)[^&\s]+/gi, '$1***')
+    .replace(/([?&]token=)[^&\s]+/gi, '$1***')
+    .replace(/(Authorization:\s*Bearer\s+)[^\s]+/gi, '$1***')
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/g, '$1***')
+    .replace(/("(?:appSecret|app_secret|secret|accessToken|access_token|token|encodingAesKey|encoding_aes_key|password|apiKey|api_key)"\s*:\s*")[^"]+"/gi, '$1***"');
+}
+
+/**
+ * Error 默认没有可枚举字段，直接 Object.entries 会打印成 {}。
+ * 这里提取安全且有排障价值的字段，避免线上日志只剩一个空对象。
+ */
+function sanitizeError(error: Error): Record<string, unknown> {
+  const extraFields: Record<string, unknown> = {};
+  const errorLike = error as Error & Record<string, unknown>;
+
+  for (const key of ['code', 'errno', 'syscall', 'status', 'statusCode', 'errcode', 'errmsg']) {
+    if (errorLike[key] !== undefined) {
+      extraFields[key] = sanitizeValue(errorLike[key]);
+    }
+  }
+
+  return {
+    name: error.name,
+    message: sanitizeString(error.message),
+    stack: error.stack ? sanitizeString(error.stack) : undefined,
+    ...extraFields,
+  };
+}
+
+/**
+ * 脱敏处理 - 只隐藏敏感字段和字符串中的敏感片段
  */
 function sanitizeValue(value: unknown): unknown {
   if (typeof value === 'string') {
-    // 检查是否像 token 或 secret
-    if (value.length > 16) {
-      return `${value.substring(0, 8)}...${value.substring(value.length - 4)}`;
-    }
-    return '***';
+    return sanitizeString(value);
+  }
+
+  if (value instanceof Error) {
+    return sanitizeError(value);
   }
 
   if (typeof value === 'object' && value !== null) {
@@ -42,12 +108,7 @@ function sanitizeValue(value: unknown): unknown {
 
     const sanitized: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      // 检查键名是否为敏感字段
-      const isSensitive = SENSITIVE_FIELDS.some(field =>
-        key.toLowerCase().includes(field.toLowerCase())
-      );
-
-      sanitized[key] = isSensitive ? sanitizeValue(val) : sanitizeValue(val);
+      sanitized[key] = isSensitiveFieldName(key) ? maskSensitiveValue(val) : sanitizeValue(val);
     }
     return sanitized;
   }
