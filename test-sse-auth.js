@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   buildSseMessageEndpoint,
+  getSseJsonBodyLimit,
   isSseRequestAuthorized,
 } from './dist/src/mcp-server/transport/sse.js';
 
@@ -46,5 +47,20 @@ assert.equal(
   true,
   'missing configured token should preserve unauthenticated local SSE behavior',
 );
+
+delete process.env.MCP_SSE_JSON_LIMIT;
+assert.equal(
+  getSseJsonBodyLimit(),
+  '16mb',
+  'SSE JSON body limit should default to 16mb for ChatGPT clients',
+);
+
+process.env.MCP_SSE_JSON_LIMIT = '24mb';
+assert.equal(
+  getSseJsonBodyLimit(),
+  '24mb',
+  'SSE JSON body limit should support environment override',
+);
+delete process.env.MCP_SSE_JSON_LIMIT;
 
 console.log('SSE auth helpers verified');

@@ -5,190 +5,13 @@ import { logger } from '../../utils/logger.js';
 import FormData from 'form-data';
 import fs from 'fs';
 import path from 'path';
-
-type SupportedImageFormat = 'jpeg' | 'png';
-
-interface ImageUploadDiagnostics {
-  source: 'filePath' | 'fileData';
-  fileName: string;
-  size: number;
-  extension: string;
-  detectedFormat: SupportedImageFormat | 'unknown';
-  contentType: string;
-  magicHead: string;
-  magicTail: string;
-  jpegHasEoi?: boolean;
-  pngHasIend?: boolean;
-  multipartField: 'media';
-  endpoint: '/cgi-bin/media/uploadimg';
-}
-
-/**
- * 将 fileData 解码为图片 Buffer。
- *
- * ChatGPT 等客户端有时会传 data:image/...;base64, 前缀，或者在 base64
- * 中插入换行。这里统一剥离前缀和空白字符；但不会在日志里输出原始 base64，
- * 避免大日志和敏感内容泄露。
- */
-function decodeBase64ImageData(fileData: string): Buffer {
-  const trimmed = fileData.trim();
-  const commaIndex = trimmed.indexOf(',');
-  const base64Text = trimmed.startsWith('data:') && commaIndex >= 0
-    ? trimmed.slice(commaIndex + 1)
-    : trimmed;
-  const normalized = base64Text.replace(/\s/g, '');
-
-  if (!normalized) {
-    throw new Error('fileData 不能为空');
-  }
-
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized) || normalized.length % 4 === 1) {
-    throw new Error('fileData 不是有效的 base64');
-  }
-
-  const buffer = Buffer.from(normalized, 'base64');
-  if (buffer.length === 0) {
-    throw new Error('fileData 解码后为空');
-  }
-
-  return buffer;
-}
-
-/**
- * 根据文件名后缀推导图片格式。
- */
-function getFormatFromExtension(ext: string): SupportedImageFormat | undefined {
-  if (ext === '.jpg' || ext === '.jpeg') {
-    return 'jpeg';
-  }
-
-  if (ext === '.png') {
-    return 'png';
-  }
-
-  return undefined;
-}
-
-/**
- * 根据文件内容识别真实图片格式。
- *
- * 只依赖魔数，不信任 fileName。这样能提前发现“文件名是 jpg，
- * 但 base64 实际是 png/损坏数据”的问题，避免把坏请求交给微信后只得到 -1。
- */
-function detectImageFormat(buffer: Buffer): SupportedImageFormat | 'unknown' {
-  const isJpeg = buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xd8;
-  if (isJpeg) {
-    return 'jpeg';
-  }
-
-  const pngSignature = '89504e470d0a1a0a';
-  if (buffer.length >= 8 && buffer.subarray(0, 8).toString('hex') === pngSignature) {
-    return 'png';
-  }
-
-  return 'unknown';
-}
-
-/**
- * 判断 JPEG 是否包含 EOI 结束标记。
- *
- * 截断的 JPEG 常会被微信返回为 -1 system error；本地先识别出来，
- * 日志会更直接，用户也能知道该重新生成或重新传图。
- */
-function hasJpegEndOfImage(buffer: Buffer): boolean {
-  for (let index = buffer.length - 2; index >= 0; index -= 1) {
-    if (buffer[index] === 0xff && buffer[index + 1] === 0xd9) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-/**
- * 判断 PNG 是否包含标准 IEND 结束块。
- */
-function hasPngIend(buffer: Buffer): boolean {
-  return buffer.length >= 12
-    && buffer.subarray(buffer.length - 12).toString('hex') === '0000000049454e44ae426082';
-}
-
-/**
- * 构建图片上传诊断信息。
- *
- * 诊断只包含元数据和魔数，不包含图片正文/base64，便于线上安全排查。
- */
-function buildImageUploadDiagnostics(
-  source: ImageUploadDiagnostics['source'],
-  fileName: string,
-  fileBuffer: Buffer,
-  ext: string,
-  detectedFormat: SupportedImageFormat | 'unknown',
-  contentType: string
-): ImageUploadDiagnostics {
-  const diagnostics: ImageUploadDiagnostics = {
-    source,
-    fileName,
-    size: fileBuffer.length,
-    extension: ext,
-    detectedFormat,
-    contentType,
-    magicHead: fileBuffer.subarray(0, 12).toString('hex'),
-    magicTail: fileBuffer.subarray(Math.max(0, fileBuffer.length - 12)).toString('hex'),
-    multipartField: 'media',
-    endpoint: '/cgi-bin/media/uploadimg',
-  };
-
-  if (detectedFormat === 'jpeg') {
-    diagnostics.jpegHasEoi = hasJpegEndOfImage(fileBuffer);
-  }
-
-  if (detectedFormat === 'png') {
-    diagnostics.pngHasIend = hasPngIend(fileBuffer);
-  }
-
-  return diagnostics;
-}
-
-/**
- * 校验图片格式并返回微信上传所需的 Content-Type。
- */
-function validateImageForUpload(fileName: string, fileBuffer: Buffer): {
-  ext: string;
-  detectedFormat: SupportedImageFormat;
-  contentType: string;
-} {
-  const ext = path.extname(fileName).toLowerCase();
-  const expectedFormat = getFormatFromExtension(ext);
-
-  if (!expectedFormat) {
-    throw new Error('仅支持 jpg/png 格式的图片');
-  }
-
-  const detectedFormat = detectImageFormat(fileBuffer);
-  if (detectedFormat === 'unknown') {
-    const magicHead = fileBuffer.subarray(0, 12).toString('hex') || 'empty';
-    throw new Error(`图片内容不是有效的 jpg/png，文件头: ${magicHead}`);
-  }
-
-  if (detectedFormat !== expectedFormat) {
-    throw new Error(`文件名后缀为 ${ext}，但图片内容识别为 ${detectedFormat}，请修正 fileName 或图片内容`);
-  }
-
-  if (detectedFormat === 'jpeg' && !hasJpegEndOfImage(fileBuffer)) {
-    throw new Error('JPEG 图片缺少 EOI 结束标记，可能是 base64 截断或图片文件损坏');
-  }
-
-  if (detectedFormat === 'png' && !hasPngIend(fileBuffer)) {
-    throw new Error('PNG 图片缺少 IEND 结束块，可能是 base64 截断或图片文件损坏');
-  }
-
-  return {
-    ext,
-    detectedFormat,
-    contentType: detectedFormat === 'png' ? 'image/png' : 'image/jpeg',
-  };
-}
+import {
+  buildImageUploadDiagnostics,
+  decodeBase64ImageData,
+  validateImageForUpload,
+  WECHAT_UPLOADIMG_MAX_SIZE_BYTES,
+  type ImageUploadDiagnostics,
+} from '../../utils/image-upload.js';
 
 /**
  * 上传图文消息图片工具处理器
@@ -227,13 +50,22 @@ async function handleUploadImgTool(args: unknown, apiClient: WechatApiClient): P
     }
 
     // 检查文件大小（1MB限制）
-    if (fileBuffer.length > 1024 * 1024) {
+    if (fileBuffer.length > WECHAT_UPLOADIMG_MAX_SIZE_BYTES) {
       throw new Error('文件大小不能超过1MB');
     }
 
     // 检查文件格式。既检查后缀，也检查真实文件头，避免微信侧只返回笼统的 -1。
     const { ext, detectedFormat, contentType } = validateImageForUpload(actualFileName, fileBuffer);
-    diagnostics = buildImageUploadDiagnostics(source, actualFileName, fileBuffer, ext, detectedFormat, contentType);
+    diagnostics = buildImageUploadDiagnostics(
+      source,
+      actualFileName,
+      fileBuffer,
+      ext,
+      detectedFormat,
+      contentType,
+      'media',
+      '/cgi-bin/media/uploadimg',
+    );
 
     logger.info('Preparing WeChat uploadimg request', diagnostics);
 
@@ -288,11 +120,24 @@ async function handleUploadImgTool(args: unknown, apiClient: WechatApiClient): P
  */
 export const uploadImgTool: McpTool = {
   name: 'wechat_upload_img',
-  description: '上传图文消息内所需的图片，不占用素材库限制',
+  description: [
+    '远程 ChatGPT/SSE 上传本地图片时：优先调用 wechat_stage_image_upload 分片上传生成服务器 filePath，再调用本工具；不要直接传长 base64。',
+    '只有客户端能直接访问外部 HTTP 上传地址时，才可改用 wechat_prepare_image_upload 生成 uploadUrl。',
+    '上传微信公众号图文消息正文内使用的图片，并返回可写入文章 HTML 的图片 URL；不占用公众号永久素材库限制。',
+    '图片必须是完整的 JPG/JPEG/PNG，大小不超过 1MB。',
+    '本地 stdio 模式可以传 filePath；远程 SSE 模式下 filePath 必须是 MCP 服务器上的绝对路径。',
+    '如果只能传 fileData，请提供完整 base64 和 fileName，支持自动剥离 data:image/...;base64, 前缀。',
+  ].join('\n'),
   inputSchema: {
-    filePath: z.string().optional().describe('图片文件路径（与fileData二选一）'),
-    fileData: z.string().optional().describe('base64编码的图片数据（与filePath二选一）'),
-    fileName: z.string().optional().describe('文件名（可选，默认从路径提取或使用image.jpg）')
+    filePath: z.string().optional().describe(
+      'MCP 服务器本地图片绝对路径（与 fileData 二选一）。远程 SSE 模式下不能传用户电脑本地路径；请先调用 wechat_stage_image_upload，finish 成功后把响应里的 filePath 传给本工具。',
+    ),
+    fileData: z.string().optional().describe(
+      '完整图片 base64（与 filePath 二选一）。仅在小图且无法使用 wechat_stage_image_upload 时兜底使用；长 base64 容易被 AI/MCP JSON 调用链路截断。支持 data:image/...;base64, 前缀。',
+    ),
+    fileName: z.string().optional().describe(
+      '使用 fileData 时建议提供文件名，例如 image.jpg 或 image.png；使用 filePath 时默认从路径提取。',
+    )
   },
   handler: handleUploadImgTool
 };

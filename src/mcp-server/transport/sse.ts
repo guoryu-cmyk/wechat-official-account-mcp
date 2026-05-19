@@ -1,7 +1,19 @@
 import express from 'express';
+import multer from 'multer';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { InitTransportServerFunction } from '../shared/index.js';
 import { logger } from '../../utils/logger.js';
+import {
+  saveUploadedImageToTemp,
+} from './image-upload.js';
+import {
+  WECHAT_UPLOADIMG_MAX_SIZE_BYTES,
+} from '../../utils/image-upload.js';
+import {
+  consumeImageUploadTicket,
+  IMAGE_UPLOAD_TICKET_HEADER,
+  IMAGE_UPLOAD_TICKET_QUERY_KEY,
+} from '../../utils/image-upload-ticket.js';
 
 type SseRequestLike = {
   query?: Record<string, unknown>;
@@ -9,10 +21,24 @@ type SseRequestLike = {
 };
 
 const MESSAGE_ENDPOINT = '/messages';
+const IMAGE_UPLOAD_ENDPOINT = '/upload-image';
 const TOKEN_QUERY_KEY = 'token';
+const DEFAULT_SSE_JSON_BODY_LIMIT = '16mb';
 
 function getSingleQueryValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function getSingleHeaderValue(value: unknown): string | undefined {
+  if (typeof value === 'string' && value.length > 0) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.find(item => typeof item === 'string' && item.length > 0);
+  }
+
+  return undefined;
 }
 
 function getBearerToken(authHeader: unknown): string | undefined {
@@ -30,6 +56,25 @@ function getBearerToken(authHeader: unknown): string | undefined {
 
 function getSseQueryToken(req: SseRequestLike): string | undefined {
   return getSingleQueryValue(req.query?.[TOKEN_QUERY_KEY]);
+}
+
+function getImageUploadTicketToken(req: SseRequestLike): string | undefined {
+  return (
+    getSingleQueryValue(req.query?.[IMAGE_UPLOAD_TICKET_QUERY_KEY]) ||
+    getSingleHeaderValue(req.headers?.[IMAGE_UPLOAD_TICKET_HEADER])
+  );
+}
+
+/**
+ * 设置 SSE 相关 HTTP 端点的跨域响应头。
+ *
+ * /upload-image 可能被浏览器或外部客户端直接调用；这里保持和 /sse 一致，
+ * 但真正写入文件的 POST 请求仍会走 MCP_AUTH_TOKEN 鉴权。
+ */
+function setSseCorsHeaders(res: express.Response): void {
+  res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+  res.setHeader('Access-Control-Allow-Headers', `Cache-Control, Content-Type, Authorization, ${IMAGE_UPLOAD_TICKET_HEADER}`);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 }
 
 /**
@@ -64,6 +109,37 @@ export function isSseRequestAuthorized(
   return queryToken === expectedToken || bearerToken === expectedToken;
 }
 
+/**
+ * 校验图片上传 HTTP 接口的访问权限。
+ *
+ * /upload-image 继续兼容原来的 MCP_AUTH_TOKEN，同时支持 prepare 工具生成的
+ * 一次性 upload_token。这样 AI 可以通过 MCP 工具拿到短期上传地址，而不需要知道
+ * 长期服务 token。
+ */
+function isImageUploadRequestAuthorized(
+  req: SseRequestLike,
+  expectedToken = process.env.MCP_AUTH_TOKEN,
+): boolean {
+  if (isSseRequestAuthorized(req, expectedToken)) {
+    return true;
+  }
+
+  const consumeResult = consumeImageUploadTicket(getImageUploadTicketToken(req));
+  if ('reason' in consumeResult) {
+    logger.warn('Rejected image upload request', { reason: consumeResult.reason });
+    return false;
+  }
+
+  logger.info('Accepted one-time image upload ticket', {
+    expiresAt: new Date(consumeResult.ticket.expiresAt).toISOString(),
+  });
+  return true;
+}
+
+export function getSseJsonBodyLimit(): string {
+  return process.env.MCP_SSE_JSON_LIMIT || DEFAULT_SSE_JSON_BODY_LIMIT;
+}
+
 export const initSSEServer: InitTransportServerFunction = async (
   getNewServer,
   options,
@@ -76,9 +152,16 @@ export const initSSEServer: InitTransportServerFunction = async (
   }
 
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: getSseJsonBodyLimit() }));
   const transports = new Map<string, SSEServerTransport>();
   const expectedToken = process.env.MCP_AUTH_TOKEN;
+  const imageUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: WECHAT_UPLOADIMG_MAX_SIZE_BYTES,
+      files: 1,
+    },
+  });
 
   if (!expectedToken) {
     logger.warn('MCP_AUTH_TOKEN is not set; SSE transport will accept unauthenticated requests.');
@@ -102,8 +185,7 @@ export const initSSEServer: InitTransportServerFunction = async (
         return;
       }
 
-      res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-      res.setHeader('Access-Control-Allow-Headers', 'Cache-Control, Content-Type, Authorization');
+      setSseCorsHeaders(res);
 
       // 为每个 SSE 连接创建独立 transport，后续 /messages 通过 sessionId 找回它。
       const messageEndpoint = buildSseMessageEndpoint(getSseQueryToken(req));
@@ -135,6 +217,76 @@ export const initSSEServer: InitTransportServerFunction = async (
         res.status(500).json({ error: 'Failed to establish SSE connection' });
       }
     }
+  });
+
+  app.options(IMAGE_UPLOAD_ENDPOINT, (_req, res) => {
+    setSseCorsHeaders(res);
+    res.status(204).send();
+  });
+
+  app.post(IMAGE_UPLOAD_ENDPOINT, (req, res) => {
+    setSseCorsHeaders(res);
+
+    if (!isImageUploadRequestAuthorized(req, expectedToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    imageUpload.single('file')(req, res, async (uploadError: unknown) => {
+      try {
+        if (uploadError) {
+          const errorCode = (uploadError as { code?: string }).code;
+          if (errorCode === 'LIMIT_FILE_SIZE') {
+            res.status(413).json({ error: '文件大小不能超过1MB' });
+            return;
+          }
+
+          throw uploadError;
+        }
+
+        if (!req.file) {
+          res.status(400).json({ error: '缺少 multipart/form-data 文件字段 file' });
+          return;
+        }
+
+        const savedImage = await saveUploadedImageToTemp({
+          buffer: req.file.buffer,
+          originalName: req.file.originalname,
+        });
+
+        logger.info('SSE image uploaded to server temp directory', {
+          filePath: savedImage.filePath,
+          fileName: savedImage.fileName,
+          originalName: savedImage.originalName,
+          size: savedImage.size,
+          detectedFormat: savedImage.detectedFormat,
+          contentType: savedImage.contentType,
+        });
+
+        res.json({
+          ok: true,
+          filePath: savedImage.filePath,
+          fileName: savedImage.fileName,
+          originalName: savedImage.originalName,
+          size: savedImage.size,
+          detectedFormat: savedImage.detectedFormat,
+          contentType: savedImage.contentType,
+          nextTool: {
+            name: 'wechat_upload_img',
+            arguments: {
+              filePath: savedImage.filePath,
+            },
+          },
+        });
+      } catch (error) {
+        logger.error('SSE image upload failed:', error);
+        if (!res.headersSent) {
+          res.status(400).json({
+            error: error instanceof Error ? error.message : '图片上传失败',
+          });
+        }
+      }
+    });
   });
 
   app.post('/messages', async (req, res) => {

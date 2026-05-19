@@ -1,6 +1,8 @@
 import { WechatToolDefinition, McpTool } from '../types.js';
 import { authTool, authMcpTool } from './auth-tool.js';
 import { mediaUploadTool } from './media-upload-tool.js';
+import { prepareImageUploadTool } from './prepare-image-upload-tool.js';
+import { stageImageUploadTool } from './stage-image-upload-tool.js';
 import { uploadImgTool } from './upload-img-tool.js';
 import { permanentMediaTool } from './permanent-media-tool.js';
 import { draftTool, draftMcpTool } from './draft-tool.js';
@@ -34,6 +36,8 @@ export const mcpTools: McpTool[] = [
   publishMcpTool,
   permanentMediaTool,
   mediaUploadTool,
+  stageImageUploadTool,
+  prepareImageUploadTool,
   uploadImgTool,
 
   // 用户管理
@@ -61,6 +65,8 @@ export const mcpTools: McpTool[] = [
 export {
   authTool,
   mediaUploadTool,
+  stageImageUploadTool,
+  prepareImageUploadTool,
   uploadImgTool,
   permanentMediaTool,
   draftTool,

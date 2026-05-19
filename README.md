@@ -11,7 +11,7 @@
 
 **当前版本**: `v2.0.0` （查看 [CHANGELOG](./CHANGELOG.md) | [v1.1.0 Release Notes](./RELEASE_NOTES_v1.1.0.md)）
 
-**重大更新**: 从 6 个工具扩展到 15 个工具，覆盖微信公众号 95% 的核心 API 功能！（详见 [功能总览](./FEATURES_OVERVIEW.md)）
+**重大更新**: 从 6 个工具扩展到 17 个工具，覆盖微信公众号 95% 的核心 API 功能！（详见 [功能总览](./FEATURES_OVERVIEW.md)）
 
 ## 📖 文档导航
 
@@ -58,6 +58,110 @@ npx wechat-official-account-mcp mcp -a wx1234567890abcdef -s your_app_secret_her
 ```
 
 > 提示：如使用 SSE 模式，请设置 `CORS_ORIGIN` 为允许访问的域名白名单。
+
+### SSE 模式图片上传流程
+
+远程 SSE 模式下，`wechat_upload_img` 的 `filePath` 必须是 MCP 服务器上的路径，不能直接读取用户电脑本地文件。为了避免把图片转成超长 base64 后在 AI/MCP JSON 参数链路中被截断，且兼容 ChatGPT 执行环境无法对外 curl 的情况，推荐优先调用 MCP 工具 `wechat_stage_image_upload` 分片上传图片。
+
+`wechat_stage_image_upload` 不需要外部 HTTP 网络，完整流程如下：
+
+```text
+1. 调用 wechat_stage_image_upload({ "action": "start", "fileName": "article.jpg", "totalSize": 5572 })
+2. 把本地图片转成 base64，并按 65536 个字符左右切块，分片长度必须是 4 的倍数
+3. 按顺序多次调用 wechat_stage_image_upload({ "action": "append", "uploadId": "...", "chunkIndex": 0, "chunkData": "..." })
+4. 调用 wechat_stage_image_upload({ "action": "finish", "uploadId": "..." })，读取返回的 filePath
+5. 调用 wechat_upload_img({ "filePath": "<返回的 filePath>" })
+```
+
+如果客户端明确可以直接执行外部 HTTP POST，也可以调用 `wechat_prepare_image_upload` 获取一次性 `uploadUrl`：
+
+`wechat_prepare_image_upload` 会返回：
+
+```json
+{
+  "ok": true,
+  "uploadUrl": "https://example.com/upload-image?upload_token=xxxx",
+  "method": "POST",
+  "contentType": "multipart/form-data",
+  "formField": "file",
+  "maxBytes": 1048576,
+  "allowedFormats": ["jpg", "jpeg", "png"],
+  "expiresInSeconds": 300,
+  "oneTime": true,
+  "networkHint": {
+    "curlResolve": "guoairong.site:443:110.42.214.78",
+    "curlOption": "--resolve guoairong.site:443:110.42.214.78"
+  },
+  "curlExample": "curl --resolve 'guoairong.site:443:110.42.214.78' -X POST -F 'file=@/path/to/image.png' 'https://guoairong.site/upload-image?upload_token=xxxx'",
+  "nextStep": {
+    "tool": "wechat_upload_img",
+    "arguments": {
+      "filePath": "<filePath from upload response>"
+    }
+  }
+}
+```
+
+> 生成绝对 `uploadUrl` 需要服务端配置 `MCP_PUBLIC_BASE_URL`，例如 `MCP_PUBLIC_BASE_URL=https://example.com`。
+> 如果执行环境无法解析域名，可配置 `MCP_UPLOAD_CURL_RESOLVE=guoairong.site:443:110.42.214.78`。客户端使用返回的 `networkHint.curlOption`，不要把 HTTPS URL 改成 `https://IP`。
+
+上传地址对应的 HTTP 接口：
+
+```text
+POST /upload-image
+Content-Type: multipart/form-data
+字段名: file
+```
+
+鉴权方式支持两种：
+
+- 推荐：使用 `wechat_prepare_image_upload` 返回的 `uploadUrl`，其中已经包含一次性 `upload_token`
+- 兼容：`POST /upload-image?token=<MCP_AUTH_TOKEN>` 或 `Authorization: Bearer <MCP_AUTH_TOKEN>`
+
+上传要求：
+
+- 图片格式：完整的 JPG/JPEG/PNG
+- 大小限制：不超过 1MB（符合微信公众号图文正文图片 `uploadimg` 接口要求）
+- 保存目录：`~/wechat-official-account-mcp/temp`
+
+返回示例：
+
+```json
+{
+  "ok": true,
+  "filePath": "/home/ubuntu/wechat-official-account-mcp/temp/xxx.png",
+  "fileName": "xxx.png",
+  "size": 5589,
+  "detectedFormat": "png",
+  "contentType": "image/png",
+  "nextTool": {
+    "name": "wechat_upload_img",
+    "arguments": {
+      "filePath": "/home/ubuntu/wechat-official-account-mcp/temp/xxx.png"
+    }
+  }
+}
+```
+
+HTTP uploadUrl 调用流程：
+
+```text
+1. 调用 MCP 工具 wechat_prepare_image_upload，获取 uploadUrl
+2. 客户端用 multipart/form-data 的 file 字段上传本地图片到 uploadUrl
+3. 读取响应里的 filePath
+4. 调用 MCP 工具 wechat_upload_img({ "filePath": "<返回的 filePath>" })
+5. 使用 wechat_upload_img 返回的微信图片 URL 写入图文正文
+```
+
+curl 示例：
+
+```bash
+curl -X POST \
+  -F "file=@./article-image.png;type=image/png" \
+  "https://example.com/upload-image?upload_token=<wechat_prepare_image_upload返回的一次性token>"
+```
+
+> 注意：如果 ChatGPT 执行 curl 出现 DNS 失败、Failed to connect、HTTP_STATUS:000 等网络错误，请不要继续尝试 HTTP 上传，改用 `wechat_stage_image_upload` 分片上传。
 
 ### 方式二：全局安装
 
@@ -125,7 +229,37 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 - 视频：MP4（大小不超过 10MB）
 - 缩略图：JPG（大小不超过 64KB）
 
-### 3. 图文消息图片上传工具 (`wechat_upload_img`)
+### 3. 分片图片暂存工具 (`wechat_stage_image_upload`)
+
+当 ChatGPT/远程 SSE 环境无法直接访问外部 HTTP 上传地址时，通过 MCP tool 调用链路分片上传本地图片到服务器临时目录。
+
+**支持操作**:
+- `start`: 创建分片上传会话，返回 `uploadId` 和推荐分片大小
+- `append`: 按 `chunkIndex` 顺序追加一个 base64 分片
+- `finish`: 合并、校验并保存图片，返回服务器 `filePath`
+- `abort`: 取消会话并清理临时分片
+
+**使用场景**:
+- ChatGPT 执行 curl 返回 DNS 失败、Failed to connect、HTTP_STATUS:000
+- 避免把完整图片 base64 一次性传给 `wechat_upload_img`
+- 不需要暴露 `MCP_AUTH_TOKEN`，也不依赖额外 HTTP 上传网络
+
+### 4. 图片上传准备工具 (`wechat_prepare_image_upload`)
+
+远程 SSE 模式下上传本地图片前，生成短期一次性 `uploadUrl`。AI 应先调用本工具，再把本地图片以 multipart/form-data 上传到返回的地址。
+
+**返回信息**:
+- `uploadUrl`: 已包含一次性 `upload_token` 的上传地址
+- `formField`: 固定为 `file`
+- `expiresInSeconds`: 有效期，默认 300 秒
+- `nextStep`: 上传成功后应调用的 MCP 工具与参数格式
+
+**使用场景**:
+- ChatGPT 等远程 MCP 客户端不能直接读取用户电脑本地路径
+- 避免把图片转成超长 base64 导致参数截断
+- 避免把长期 `MCP_AUTH_TOKEN` 暴露给 AI
+
+### 5. 图文消息图片上传工具 (`wechat_upload_img`)
 
 上传图文消息内所需的图片，不占用素材库限制。
 
@@ -139,8 +273,9 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 - 不占用公众号素材库的100000个图片限制
 - 专用于图文消息内容中的图片
 - 返回可直接在图文消息中使用的图片URL
+- 远程 SSE 模式推荐先调用 `wechat_stage_image_upload` 分片暂存图片，再把 finish 响应里的 `filePath` 传给本工具，避免长 base64 被截断
 
-### 4. 永久素材工具 (`wechat_permanent_media`)
+### 6. 永久素材工具 (`wechat_permanent_media`)
 
 管理微信公众号永久素材。
 
@@ -151,7 +286,7 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 - `list`: 获取素材列表
 - `count`: 获取素材总数统计
 
-### 5. 草稿管理工具 (`wechat_draft`)
+### 7. 草稿管理工具 (`wechat_draft`)
 
 管理微信公众号图文草稿。
 
@@ -162,7 +297,7 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 - `list`: 获取草稿列表
 - `count`: 获取草稿总数
 
-### 6. 发布工具 (`wechat_publish`)
+### 8. 发布工具 (`wechat_publish`)
 
 管理微信公众号文章发布。
 
@@ -172,7 +307,7 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 - `delete`: 删除发布
 - `list`: 获取发布列表
 
-### 7. 用户管理工具 (`wechat_user`)
+### 9. 用户管理工具 (`wechat_user`)
 
 管理微信公众号用户信息和数据统计。
 
@@ -189,7 +324,7 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 - 用户增长追踪
 - 用户信息管理
 
-### 8. 标签管理工具 (`wechat_tag`)
+### 10. 标签管理工具 (`wechat_tag`)
 
 管理用户标签，实现用户分组。
 
@@ -207,7 +342,7 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 - 精准营销
 - 用户分层运营
 
-### 9. 自定义菜单工具 (`wechat_menu`)
+### 11. 自定义菜单工具 (`wechat_menu`)
 
 管理公众号底部菜单。
 
@@ -231,7 +366,7 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 - 活动推广
 - 自定义服务入口
 
-### 10. 模板消息工具 (`wechat_template_msg`)
+### 12. 模板消息工具 (`wechat_template_msg`)
 
 发送服务通知类模板消息。
 
@@ -249,7 +384,7 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 
 **注意**: 模板消息需要先在微信公众平台后台配置模板。
 
-### 11. 客服消息工具 (`wechat_customer_service`)
+### 13. 客服消息工具 (`wechat_customer_service`)
 
 在用户动作后48小时内主动发送消息。
 
@@ -270,7 +405,7 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 
 **限制**: 只能在用户产生动作后48小时内发送。
 
-### 12. 数据统计分析工具 (`wechat_statistics`)
+### 14. 数据统计分析工具 (`wechat_statistics`)
 
 获取公众号运营数据分析。
 
@@ -294,7 +429,7 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 - 内容效果评估
 - 接口性能监控
 
-### 13. 自动回复工具 (`wechat_auto_reply`)
+### 15. 自动回复工具 (`wechat_auto_reply`)
 
 查询自动回复规则配置。
 
@@ -310,7 +445,7 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 - 查看当前配置
 - 调试自动回复规则
 
-### 14. 群发消息工具 (`wechat_mass_send`)
+### 16. 群发消息工具 (`wechat_mass_send`)
 
 向用户群发消息。
 
@@ -338,7 +473,7 @@ node dist/src/cli.js mcp -a <your_app_id> -s <your_app_secret>
 - 活动通知
 - 节日问候
 
-### 15. 订阅通知工具 (`wechat_subscribe_msg`)
+### 17. 订阅通知工具 (`wechat_subscribe_msg`)
 
 发送一次性订阅通知。
 
