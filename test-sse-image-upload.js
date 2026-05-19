@@ -9,6 +9,8 @@ import {
 import {
   appendChunkedImageUpload,
   finishChunkedImageUpload,
+  IMAGE_UPLOAD_CHUNK_BASE64_CHARS,
+  IMAGE_UPLOAD_MAX_CHUNK_BASE64_CHARS,
   startChunkedImageUpload,
 } from './dist/src/utils/chunked-image-upload.js';
 import {
@@ -35,6 +37,17 @@ const uploadRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-mcp-upload-'));
 process.env.WECHAT_MCP_IMAGE_UPLOAD_DIR = uploadRoot;
 
 try {
+  assert.equal(
+    IMAGE_UPLOAD_CHUNK_BASE64_CHARS,
+    256 * 1024,
+    'default staged upload chunk should avoid excessive append calls',
+  );
+  assert.equal(
+    IMAGE_UPLOAD_MAX_CHUNK_BASE64_CHARS,
+    512 * 1024,
+    'single staged upload chunk should keep a safe upper bound',
+  );
+
   const saved = await saveUploadedImageToTemp({
     buffer: pngFixture,
     originalName: '../../unsafe name.PNG',

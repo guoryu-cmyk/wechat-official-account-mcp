@@ -39,7 +39,7 @@ function requireString(value: string | undefined, name: string): string {
  * 通过 MCP tool 调用链路分片上传图片到服务器临时目录。
  *
  * 这个工具专门解决 ChatGPT 不能直接 curl 外部上传地址、且长 base64 又容易被截断的问题：
- * 每次只传一个很小的 base64 分片，全部分片到齐后再在服务器端合并、校验并落盘。
+ * 每次只传一个受控大小的 base64 分片，全部分片到齐后再在服务器端合并、校验并落盘。
  */
 async function handleStageImageUploadTool(
   args: unknown,
@@ -137,7 +137,7 @@ export const stageImageUploadTool: McpTool = {
   name: 'wechat_stage_image_upload',
   description: [
     '当 ChatGPT/远程 SSE 环境无法直接 HTTP POST /upload-image 时，用本工具通过 MCP 分片上传本地图片到服务器临时目录。',
-    '调用流程：action=start 创建会话；把图片 base64 按 65536 字符左右切块；多次 action=append 顺序上传分片；action=finish 返回服务器 filePath；最后调用 wechat_upload_img。',
+    '调用流程：action=start 创建会话；把图片 base64 按 start 返回的 chunkSizeBase64Chars 切块；多次 action=append 顺序上传分片；action=finish 返回服务器 filePath；最后调用 wechat_upload_img。',
     '每个 chunkData 必须是较短 base64 分片，长度必须是 4 的倍数；不要把完整图片 base64 一次性传给任何工具。',
     '图片最终仍按微信公众号 uploadimg 要求校验：完整 JPG/JPEG/PNG，大小不超过 1MB。',
   ].join('\n'),
@@ -155,7 +155,7 @@ export const stageImageUploadTool: McpTool = {
       'action=append 时必填，从 0 开始递增，必须按顺序上传。',
     ),
     chunkData: z.string().optional().describe(
-      'action=append 时必填，单个 base64 分片，不要传完整图片；建议每块 65536 个 base64 字符，且长度为 4 的倍数。',
+      'action=append 时必填，单个 base64 分片，不要传完整图片；建议按 start 返回的 chunkSizeBase64Chars 切块，且长度为 4 的倍数。',
     ),
     totalChunks: z.number().int().positive().optional().describe(
       'action=start 时可选，用于 finish 时校验分片数量。',

@@ -8,8 +8,8 @@ import {
   type SavedUploadedImage,
 } from './image-temp-storage.js';
 
-export const IMAGE_UPLOAD_CHUNK_BASE64_CHARS = 64 * 1024;
-export const IMAGE_UPLOAD_MAX_CHUNK_BASE64_CHARS = 128 * 1024;
+export const IMAGE_UPLOAD_CHUNK_BASE64_CHARS = 256 * 1024;
+export const IMAGE_UPLOAD_MAX_CHUNK_BASE64_CHARS = 512 * 1024;
 const CHUNK_SESSION_TTL_MS = 30 * 60 * 1000;
 
 interface ChunkedImageUploadManifest {

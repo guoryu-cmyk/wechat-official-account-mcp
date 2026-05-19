@@ -69,7 +69,7 @@ npx wechat-official-account-mcp mcp -a wx1234567890abcdef -s your_app_secret_her
 
 ```text
 1. 调用 wechat_stage_image_upload({ "action": "start", "fileName": "article.jpg", "totalSize": 5572 })
-2. 把本地图片转成 base64，并按 65536 个字符左右切块，分片长度必须是 4 的倍数
+2. 把本地图片转成 base64，并按 start 返回的 chunkSizeBase64Chars 切块（默认 262144 个 base64 字符，约 192KB 原始图片数据），分片长度必须是 4 的倍数
 3. 按顺序多次调用 wechat_stage_image_upload({ "action": "append", "uploadId": "...", "chunkIndex": 0, "chunkData": "..." })
 4. 调用 wechat_stage_image_upload({ "action": "finish", "uploadId": "..." })，读取返回的 filePath
 5. 调用 wechat_upload_img({ "filePath": "<返回的 filePath>" })
@@ -311,6 +311,11 @@ wechat-mcp mcp --config ~/wechat-official-account-mcp/accounts.json --account zh
 - `append`: 按 `chunkIndex` 顺序追加一个 base64 分片
 - `finish`: 合并、校验并保存图片，返回服务器 `filePath`
 - `abort`: 取消会话并清理临时分片
+
+**分片大小**:
+- 默认推荐：`262144` 个 base64 字符（约 `192KB` 原始图片数据）
+- 单片上限：`524288` 个 base64 字符（约 `384KB` 原始图片数据）
+- 1MB 图片通常需要 3 到 6 次 `append`，既减少频繁调用，也避免一次传超长 base64 被截断
 
 **使用场景**:
 - ChatGPT 执行 curl 返回 DNS 失败、Failed to connect、HTTP_STATUS:000
