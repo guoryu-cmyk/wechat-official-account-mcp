@@ -4,6 +4,8 @@ import {
   abortChunkedImageUpload,
   appendChunkedImageUpload,
   finishChunkedImageUpload,
+  IMAGE_UPLOAD_CHUNK_BASE64_CHARS,
+  IMAGE_UPLOAD_MAX_CHUNK_BASE64_CHARS,
   startChunkedImageUpload,
 } from '../../utils/chunked-image-upload.js';
 
@@ -61,7 +63,9 @@ async function handleStageImageUploadTool(
       action: 'start',
       ...session,
       instructions: [
-        '把本地图片转成完整 base64 字符串，并按 chunkSizeBase64Chars 切分；每个分片长度必须是 4 的倍数。',
+        '把本地图片转成完整 base64 字符串；如果完整 base64 长度不超过 maxChunkBase64Chars，可以只调用一次 action=append 上传唯一分片。',
+        '需要多片时，优先按 chunkSizeBase64Chars 尽量切满；除最后一片外，不要故意切成很小的分片，以减少 MCP tool 调用次数。',
+        '每个分片长度必须是 4 的倍数；chunkSizeBase64Chars 和 maxChunkBase64Chars 都已经按 base64 边界对齐。',
         '按 chunkIndex 从 0 开始依次调用本工具 action=append。',
         '全部 append 成功后调用 action=finish，读取返回的 filePath，再调用 wechat_upload_img。',
       ],
@@ -137,8 +141,9 @@ export const stageImageUploadTool: McpTool = {
   name: 'wechat_stage_image_upload',
   description: [
     '当 ChatGPT/远程 SSE 环境无法直接 HTTP POST /upload-image 时，用本工具通过 MCP 分片上传本地图片到服务器临时目录。',
-    '调用流程：action=start 创建会话；把图片 base64 按 start 返回的 chunkSizeBase64Chars 切块；多次 action=append 顺序上传分片；action=finish 返回服务器 filePath；最后调用 wechat_upload_img。',
-    '每个 chunkData 必须是较短 base64 分片，长度必须是 4 的倍数；不要把完整图片 base64 一次性传给任何工具。',
+    `调用流程：action=start 创建会话；把图片 base64 按返回的 chunkSizeBase64Chars 切块；推荐每片 ${IMAGE_UPLOAD_CHUNK_BASE64_CHARS} 个 base64 字符，单片最多 ${IMAGE_UPLOAD_MAX_CHUNK_BASE64_CHARS} 个 base64 字符；action=finish 返回服务器 filePath；最后调用 wechat_upload_img。`,
+    '如果完整图片 base64 长度不超过 maxChunkBase64Chars，可以只调用一次 action=append；需要多片时，除最后一片外应尽量切满 chunkSizeBase64Chars，不要故意拆成很多小分片。',
+    '每个 chunkData 长度必须是 4 的倍数；不要把超出 maxChunkBase64Chars 的完整图片 base64 一次性传给任何工具。',
     '图片最终仍按微信公众号 uploadimg 要求校验：完整 JPG/JPEG/PNG，大小不超过 1MB。',
   ].join('\n'),
   inputSchema: {
@@ -155,7 +160,7 @@ export const stageImageUploadTool: McpTool = {
       'action=append 时必填，从 0 开始递增，必须按顺序上传。',
     ),
     chunkData: z.string().optional().describe(
-      'action=append 时必填，单个 base64 分片，不要传完整图片；建议按 start 返回的 chunkSizeBase64Chars 切块，且长度为 4 的倍数。',
+      'action=append 时必填，单个 base64 分片。优先按 start 返回的 chunkSizeBase64Chars 尽量切满；如果完整 base64 不超过 maxChunkBase64Chars，可作为唯一分片一次 append；长度必须是 4 的倍数。',
     ),
     totalChunks: z.number().int().positive().optional().describe(
       'action=start 时可选，用于 finish 时校验分片数量。',
