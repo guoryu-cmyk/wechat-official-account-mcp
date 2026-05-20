@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getMcpPublicBaseUrl } from '../../utils/image-upload-ticket.js';
 
-export const CHATGPT_ASSET_WIDGET_URI = 'ui://wechat/chatgpt-asset-upload-v2.html';
+export const CHATGPT_ASSET_WIDGET_URI = 'ui://wechat/chatgpt-asset-upload-v3.html';
 
 function getChatGPTAssetWidgetHtml(): string {
   return `<!doctype html>
@@ -71,6 +71,50 @@ function getChatGPTAssetWidgetHtml(): string {
       font-size: 12px;
       line-height: 1.5;
     }
+    .asset-list {
+      display: grid;
+      gap: 10px;
+      margin: 10px 0 12px;
+    }
+    .asset-item {
+      display: grid;
+      gap: 8px;
+      border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+      border-radius: 8px;
+      padding: 10px;
+      background: Canvas;
+    }
+    .asset-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+    }
+    .asset-title {
+      font-weight: 700;
+      line-height: 1.35;
+    }
+    .asset-tag {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 12px;
+      background: color-mix(in srgb, #0f766e 14%, Canvas);
+      color: #0f766e;
+    }
+    .asset-meta {
+      display: grid;
+      gap: 3px;
+      color: color-mix(in srgb, CanvasText 72%, transparent);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .asset-actions {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
     pre {
       overflow: auto;
       white-space: pre-wrap;
@@ -83,6 +127,9 @@ function getChatGPTAssetWidgetHtml(): string {
     }
     @media (max-width: 640px) {
       .row {
+        grid-template-columns: 1fr;
+      }
+      .asset-actions {
         grid-template-columns: 1fr;
       }
     }
@@ -102,6 +149,12 @@ function getChatGPTAssetWidgetHtml(): string {
         </label>
       </div>
       <p class="muted">同一篇文章后续重传 ZIP 或替换单图时，请复用 MCP 返回的 directoryId。</p>
+    </section>
+
+    <section class="panel">
+      <button id="refreshButton">查看当前工作区</button>
+      <div id="assetList" class="asset-list"></div>
+      <p class="muted">处理素材包后，这里会按“封面图 / 正文图 1 / 正文图 2...”列出图片。可直接在对应图片旁选择新图替换，不需要手动记 assetId。</p>
     </section>
 
     <section class="panel">
@@ -135,13 +188,13 @@ function getChatGPTAssetWidgetHtml(): string {
     </section>
 
     <section class="panel">
-      <button id="refreshButton">查看当前工作区</button>
       <pre id="output">等待操作...</pre>
     </section>
   </main>
 
   <script>
     const output = document.getElementById('output');
+    const assetList = document.getElementById('assetList');
     const directoryIdInput = document.getElementById('directoryId');
     const topicSlugInput = document.getElementById('topicSlug');
     const toolInput = window.openai?.toolInput || {};
@@ -151,6 +204,75 @@ function getChatGPTAssetWidgetHtml(): string {
 
     function setOutput(value) {
       output.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function sortAssetsForDisplay(assets) {
+      return [...assets].sort((left, right) => {
+        if (left.role !== right.role) {
+          return left.role === 'cover' ? -1 : 1;
+        }
+
+        const leftIndex = Number.isFinite(left.figureIndex) ? left.figureIndex : 9999;
+        const rightIndex = Number.isFinite(right.figureIndex) ? right.figureIndex : 9999;
+        return leftIndex - rightIndex || String(left.id).localeCompare(String(right.id));
+      });
+    }
+
+    function getAssetTitle(asset) {
+      if (asset.displayName) return asset.displayName;
+      if (asset.label) return asset.label;
+      if (asset.role === 'cover') return '封面图';
+      if (asset.figureIndex) return '正文图 ' + asset.figureIndex;
+      return '正文图：' + asset.id;
+    }
+
+    function renderAssetList(structured) {
+      const assets = Array.isArray(structured?.assets) ? sortAssetsForDisplay(structured.assets) : [];
+
+      if (!assets.length) {
+        assetList.innerHTML = '<p class="muted">暂无 asset 列表。处理素材包或填写 directoryId 后点击“查看当前工作区”。</p>';
+        return;
+      }
+
+      assetList.innerHTML = assets.map((asset, index) => {
+        const title = escapeHtml(getAssetTitle(asset));
+        const roleText = asset.role === 'cover' ? '封面' : '正文图';
+        const figureText = asset.role === 'inline' && asset.figureIndex ? '正文图 ' + asset.figureIndex : '';
+        const description = [asset.caption, asset.alt].filter(Boolean).join(' / ');
+        const currentValue = asset.wechatUrl || asset.mediaId || '';
+        const statusText = asset.status === 'replaced' ? '已替换' : asset.status === 'reused' ? '已复用' : '已上传';
+
+        return [
+          '<article class="asset-item">',
+          '  <div class="asset-head">',
+          '    <div>',
+          '      <div class="asset-title">' + title + '</div>',
+          '      <div class="muted">' + escapeHtml([figureText, asset.id].filter(Boolean).join(' · ')) + '</div>',
+          '    </div>',
+          '    <span class="asset-tag">' + escapeHtml(roleText) + '</span>',
+          '  </div>',
+          '  <div class="asset-meta">',
+          description ? '    <div>说明：' + escapeHtml(description) + '</div>' : '',
+          '    <div>原路径：' + escapeHtml(asset.sourcePath || asset.fileName || '') + '</div>',
+          currentValue ? '    <div>当前值：' + escapeHtml(currentValue) + '</div>' : '',
+          '    <div>状态：' + escapeHtml(statusText) + '</div>',
+          '  </div>',
+          '  <div class="asset-actions">',
+          '    <input class="asset-file" type="file" accept="image/png,image/jpeg" aria-label="替换 ' + title + '" />',
+          '    <button type="button" data-replace-asset-index="' + index + '" data-replace-asset-id="' + escapeHtml(asset.id) + '" data-replace-asset-role="' + escapeHtml(asset.role) + '">替换这张</button>',
+          '  </div>',
+          '</article>'
+        ].filter(Boolean).join('');
+      }).join('');
     }
 
     function normalizeFileRef(uploaded, originalFile) {
@@ -245,6 +367,7 @@ function getChatGPTAssetWidgetHtml(): string {
         directoryIdInput.value = structured.directoryId;
       }
 
+      renderAssetList(structured);
       setOutput(structured || result);
       return result;
     }
@@ -295,6 +418,36 @@ function getChatGPTAssetWidgetHtml(): string {
       });
     });
 
+    assetList.addEventListener('click', event => {
+      const button = event.target?.closest?.('[data-replace-asset-id]');
+      if (!button) return;
+
+      runWithButton(button, async () => {
+        const directoryId = directoryIdInput.value;
+        const assetId = button.dataset.replaceAssetId;
+        const role = button.dataset.replaceAssetRole;
+        const item = button.closest('.asset-item');
+        const file = item?.querySelector('.asset-file')?.files?.[0];
+
+        if (!directoryId) throw new Error('请先填写已有 directoryId');
+        if (!assetId) throw new Error('缺少 assetId');
+        if (!role) throw new Error('缺少图片 role');
+        if (!file) throw new Error('请先在这张图片旁边选择新图片');
+
+        document.getElementById('assetId').value = assetId;
+        document.getElementById('role').value = role;
+        setOutput('正在上传“' + assetId + '”的新图片到 ChatGPT...');
+        const uploadedFile = await uploadToChatGPT(file);
+        setOutput('正在替换当前工作区里的“' + assetId + '”...');
+        await callTool('wechat_upload_workspace_image_from_chatgpt_file', {
+          directoryId,
+          assetId,
+          role,
+          file: uploadedFile
+        });
+      });
+    });
+
     document.getElementById('refreshButton').addEventListener('click', event => {
       runWithButton(event.currentTarget, async () => {
         const directoryId = directoryIdInput.value;
@@ -302,6 +455,8 @@ function getChatGPTAssetWidgetHtml(): string {
         await callTool('wechat_get_article_workspace', { directoryId });
       });
     });
+
+    renderAssetList(window.openai?.toolOutput);
   </script>
 </body>
 </html>`;

@@ -26,6 +26,9 @@ export interface ChatGPTAssetManifestItem {
   id: string;
   path: string;
   role: ChatGPTAssetRole;
+  label?: string;
+  alt?: string;
+  caption?: string;
   sha256?: string;
 }
 
@@ -44,6 +47,12 @@ export interface ChatGPTWorkspaceAsset {
   id: string;
   role: ChatGPTAssetRole;
   sourcePath: string;
+  label?: string;
+  alt?: string;
+  caption?: string;
+  displayName?: string;
+  figureIndex?: number;
+  referenceCount?: number;
   sha256: string;
   fileName: string;
   size: number;
@@ -520,6 +529,49 @@ function collectArticleAssetIds(articleText: string): Set<string> {
   return ids;
 }
 
+function collectArticleAssetReferenceInfo(articleText: string): Map<string, {
+  figureIndex: number;
+  referenceCount: number;
+}> {
+  const references = new Map<string, { figureIndex: number; referenceCount: number }>();
+  const matcher = /asset:\/\/image\/([a-zA-Z0-9_-]+)/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = matcher.exec(articleText)) !== null) {
+    const existing = references.get(match[1]);
+    if (existing) {
+      existing.referenceCount += 1;
+      continue;
+    }
+
+    references.set(match[1], {
+      figureIndex: references.size + 1,
+      referenceCount: 1,
+    });
+  }
+
+  return references;
+}
+
+function buildAssetDisplayName(
+  image: ChatGPTAssetManifestItem,
+  referenceInfo?: { figureIndex: number; referenceCount: number },
+): string {
+  if (image.label) {
+    return image.label;
+  }
+
+  if (image.role === 'cover') {
+    return '封面图';
+  }
+
+  if (referenceInfo) {
+    return `正文图 ${referenceInfo.figureIndex}`;
+  }
+
+  return '正文图（未在正文中引用）';
+}
+
 function escapeHtml(input: string): string {
   return input
     .replace(/&/g, '&amp;')
@@ -685,6 +737,7 @@ async function processManifestImages(
   rootDir: string,
   manifest: ChatGPTArticleManifest,
   referencedAssetIds: Set<string>,
+  referenceInfoById: Map<string, { figureIndex: number; referenceCount: number }>,
 ): Promise<{
   assets: ChatGPTWorkspaceAsset[];
   failed: ChatGPTWorkspaceResult['failed'];
@@ -712,10 +765,17 @@ async function processManifestImages(
       const uploadFileName = path.extname(image.path)
         ? path.basename(image.path)
         : `${image.id}${ext}`;
+      const referenceInfo = referenceInfoById.get(image.id);
       const asset: ChatGPTWorkspaceAsset = {
         id: image.id,
         role: image.role,
         sourcePath: image.path,
+        label: image.label,
+        alt: image.alt,
+        caption: image.caption,
+        displayName: buildAssetDisplayName(image, referenceInfo),
+        figureIndex: referenceInfo?.figureIndex,
+        referenceCount: referenceInfo?.referenceCount,
         sha256: actualSha256,
         fileName: uploadFileName,
         size: buffer.length,
@@ -856,7 +916,14 @@ export async function processArticleBundleFromChatGPTFile(input: {
     assertAllArticleRefsDeclared(article.source, manifest);
 
     const referencedAssetIds = collectArticleAssetIds(article.source);
-    const { assets, failed } = await processManifestImages(apiClient, stagingDir, manifest, referencedAssetIds);
+    const referenceInfoById = collectArticleAssetReferenceInfo(article.source);
+    const { assets, failed } = await processManifestImages(
+      apiClient,
+      stagingDir,
+      manifest,
+      referencedAssetIds,
+      referenceInfoById,
+    );
 
     if (failed.length > 0) {
       throw new Error(`素材上传失败: ${failed.map(item => `${item.id || item.sourcePath}: ${item.message}`).join('; ')}`);
@@ -936,14 +1003,21 @@ export async function uploadWorkspaceImageFromChatGPTFile(input: {
   const targetPath = safeJoin(workspaceDir, targetRelativePath);
   const nextRevision = workspace.revision + 1;
   const existingAssets = await readWorkspaceAssets(input.directoryId);
+  const existingAsset = existingAssets.find(asset => asset.id === input.assetId);
   const nextAsset: ChatGPTWorkspaceAsset = {
     id: input.assetId,
     role: input.role,
     sourcePath: targetRelativePath,
+    label: existingAsset?.label,
+    alt: existingAsset?.alt,
+    caption: existingAsset?.caption,
+    displayName: existingAsset?.displayName || (input.role === 'cover' ? '封面图' : input.assetId),
+    figureIndex: existingAsset?.figureIndex,
+    referenceCount: existingAsset?.referenceCount,
     sha256: sha256(buffer),
     fileName: path.basename(targetRelativePath),
     size: buffer.length,
-    status: existingAssets.some(asset => asset.id === input.assetId) ? 'replaced' : 'uploaded',
+    status: existingAsset ? 'replaced' : 'uploaded',
   };
 
   if (input.role === 'inline') {
@@ -976,6 +1050,15 @@ export async function uploadWorkspaceImageFromChatGPTFile(input: {
     assets,
   });
 
+  const articleHtmlPath = path.join(workspaceDir, 'article.wechat.html');
+  let articleHtml = await fileExists(articleHtmlPath)
+    ? await fs.readFile(articleHtmlPath, 'utf8')
+    : undefined;
+  if (articleHtml && existingAsset?.wechatUrl && nextAsset.wechatUrl) {
+    articleHtml = articleHtml.split(existingAsset.wechatUrl).join(nextAsset.wechatUrl);
+    await fs.writeFile(articleHtmlPath, articleHtml, 'utf8');
+  }
+
   return {
     ok: true,
     directoryId: input.directoryId,
@@ -983,6 +1066,7 @@ export async function uploadWorkspaceImageFromChatGPTFile(input: {
     revision: nextRevision,
     baseDir: getChatGPTAssetsBaseDir(),
     workspaceDir,
+    articleHtml,
     inlineImages: assets.filter(asset => asset.wechatUrl),
     cover: assets.find(asset => asset.role === 'cover'),
     assets,
