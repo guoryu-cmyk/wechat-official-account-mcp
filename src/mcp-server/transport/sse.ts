@@ -17,6 +17,14 @@ import {
   IMAGE_UPLOAD_TICKET_HEADER,
   IMAGE_UPLOAD_TICKET_QUERY_KEY,
 } from '../../utils/image-upload-ticket.js';
+import {
+  CHATGPT_BUNDLE_DOWNLOAD_ENDPOINT,
+  CHATGPT_BUNDLE_DOWNLOAD_TOKEN_QUERY_KEY,
+  CHATGPT_BUNDLE_UPLOAD_ENDPOINT,
+  consumeUploadedChatGPTBundleFile,
+  createUploadedChatGPTBundleFileRef,
+  getMaxChatGPTAssetZipBytes,
+} from '../../utils/chatgpt-assets.js';
 
 type SseRequestLike = {
   query?: Record<string, unknown>;
@@ -176,6 +184,13 @@ export const initSSEServer: InitTransportServerFunction = async (
       files: 1,
     },
   });
+  const chatGPTBundleUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: getMaxChatGPTAssetZipBytes(),
+      files: 1,
+    },
+  });
 
   if (!expectedToken) {
     logger.warn('MCP_AUTH_TOKEN is not set; SSE transport will accept unauthenticated requests.');
@@ -270,10 +285,20 @@ export const initSSEServer: InitTransportServerFunction = async (
     }
   };
 
-  app.options([STREAMABLE_HTTP_ENDPOINT, '/sse', MESSAGE_ENDPOINT, IMAGE_UPLOAD_ENDPOINT], (_req, res) => {
+  app.options(
+    [
+      STREAMABLE_HTTP_ENDPOINT,
+      '/sse',
+      MESSAGE_ENDPOINT,
+      IMAGE_UPLOAD_ENDPOINT,
+      CHATGPT_BUNDLE_UPLOAD_ENDPOINT,
+      `${CHATGPT_BUNDLE_DOWNLOAD_ENDPOINT}/:fileId`,
+    ],
+    (_req, res) => {
     setSseCorsHeaders(res);
     res.status(204).send();
-  });
+    },
+  );
 
   app.all(STREAMABLE_HTTP_ENDPOINT, handleStreamableHttpRequest);
   app.post('/sse', handleStreamableHttpRequest);
@@ -390,6 +415,105 @@ export const initSSEServer: InitTransportServerFunction = async (
         }
       }
     });
+  });
+
+  app.post(CHATGPT_BUNDLE_UPLOAD_ENDPOINT, (req, res) => {
+    setSseCorsHeaders(res);
+
+    const consumeResult = consumeImageUploadTicket(getImageUploadTicketToken(req));
+    if ('reason' in consumeResult) {
+      logger.warn('Rejected ChatGPT bundle upload request', { reason: consumeResult.reason });
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    chatGPTBundleUpload.single('file')(req, res, async (uploadError: unknown) => {
+      try {
+        if (uploadError) {
+          const errorCode = (uploadError as { code?: string }).code;
+          if (errorCode === 'LIMIT_FILE_SIZE') {
+            res.status(413).json({
+              error: `ZIP 文件大小不能超过 ${getMaxChatGPTAssetZipBytes()} 字节`,
+            });
+            return;
+          }
+
+          throw uploadError;
+        }
+
+        if (!req.file) {
+          res.status(400).json({ error: '缺少 multipart/form-data 文件字段 file' });
+          return;
+        }
+
+        if (req.file.size > consumeResult.ticket.maxBytes) {
+          res.status(413).json({
+            error: `ZIP 文件大小不能超过 ${consumeResult.ticket.maxBytes} 字节`,
+          });
+          return;
+        }
+
+        const publicBaseUrl = process.env.MCP_PUBLIC_BASE_URL?.trim();
+        if (!publicBaseUrl) {
+          res.status(500).json({ error: '服务端未配置 MCP_PUBLIC_BASE_URL，无法生成临时下载地址' });
+          return;
+        }
+
+        const bundle = createUploadedChatGPTBundleFileRef({
+          publicBaseUrl,
+          buffer: req.file.buffer,
+          fileName: req.file.originalname || 'chatgpt-article-bundle.zip',
+          mimeType: req.file.mimetype || 'application/zip',
+        });
+
+        logger.info('ChatGPT bundle uploaded to MCP memory store', {
+          fileId: bundle.file_id,
+          fileName: bundle.file_name,
+          size: req.file.size,
+          mimeType: bundle.mime_type,
+        });
+
+        res.json({
+          ok: true,
+          bundle,
+          size: req.file.size,
+          nextTool: {
+            name: 'wechat_process_article_bundle_from_chatgpt_file',
+            arguments: {
+              bundle,
+            },
+          },
+        });
+      } catch (error) {
+        logger.error('ChatGPT bundle upload failed:', error);
+        if (!res.headersSent) {
+          res.status(400).json({
+            error: error instanceof Error ? error.message : 'ZIP 素材包上传失败',
+          });
+        }
+      }
+    });
+  });
+
+  app.get(`${CHATGPT_BUNDLE_DOWNLOAD_ENDPOINT}/:fileId`, (req, res) => {
+    const token = getSingleQueryValue(req.query[CHATGPT_BUNDLE_DOWNLOAD_TOKEN_QUERY_KEY]);
+    const result = consumeUploadedChatGPTBundleFile(req.params.fileId, token);
+
+    if ('reason' in result) {
+      logger.warn('Rejected ChatGPT bundle download request', {
+        fileId: req.params.fileId,
+        reason: result.reason,
+      });
+      res.status(result.reason === 'expired' ? 410 : 404).json({ error: 'File not found or expired' });
+      return;
+    }
+
+    res.setHeader('Content-Type', result.file.mimeType || 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${encodeURIComponent(result.file.fileName)}"`,
+    );
+    res.send(result.file.buffer);
   });
 
   app.post('/messages', async (req, res) => {

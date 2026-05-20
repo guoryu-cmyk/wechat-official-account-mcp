@@ -84,6 +84,7 @@ export function cleanupExpiredImageUploadTickets(now = Date.now()): void {
  */
 export function createImageUploadTicket(options: {
   ttlSeconds?: number;
+  maxBytes?: number;
   now?: number;
 } = {}): ImageUploadTicket {
   const now = options.now ?? Date.now();
@@ -93,7 +94,7 @@ export function createImageUploadTicket(options: {
     token,
     createdAt: now,
     expiresAt: now + ttlSeconds * 1000,
-    maxBytes: WECHAT_UPLOADIMG_MAX_SIZE_BYTES,
+    maxBytes: options.maxBytes ?? WECHAT_UPLOADIMG_MAX_SIZE_BYTES,
   };
 
   cleanupExpiredImageUploadTickets(now);

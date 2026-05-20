@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { getMcpPublicBaseUrl } from '../../utils/image-upload-ticket.js';
 
-const CHATGPT_ASSET_WIDGET_URI = 'ui://wechat/chatgpt-asset-upload.html';
+export const CHATGPT_ASSET_WIDGET_URI = 'ui://wechat/chatgpt-asset-upload-v2.html';
 
 function getChatGPTAssetWidgetHtml(): string {
   return `<!doctype html>
@@ -106,7 +107,7 @@ function getChatGPTAssetWidgetHtml(): string {
     <section class="panel">
       <label>
         上传文章素材 ZIP
-        <input id="bundleFile" type="file" accept=".zip,application/zip,application/x-zip-compressed" />
+        <input id="bundleFile" type="file" accept=".zip,application/zip,application/x-zip-compressed,application/octet-stream" />
       </label>
       <button id="bundleButton">处理素材包</button>
       <p class="muted">ZIP 根目录需要包含 manifest.json、article.md 或 article.html，以及 images/ 下的图片。正文图片引用必须使用 asset://image/&lt;assetId&gt;。</p>
@@ -161,6 +162,57 @@ function getChatGPTAssetWidgetHtml(): string {
       };
     }
 
+    function getBundleUploadConfig() {
+      return window.openai?.toolResponseMetadata?.chatgptBundleUpload;
+    }
+
+    async function uploadBundleDirectlyToMcp(file, config) {
+      if (!config?.uploadUrl) {
+        throw new Error('缺少 MCP ZIP 上传地址，请重新打开上传界面');
+      }
+
+      if (!/\\.zip$/i.test(file.name)) {
+        throw new Error('请选择 .zip 素材包');
+      }
+
+      if (config.maxBytes && file.size > config.maxBytes) {
+        throw new Error('ZIP 文件过大，当前最大允许 ' + config.maxBytes + ' 字节');
+      }
+
+      const formData = new FormData();
+      formData.append(config.formField || 'file', file, file.name);
+
+      const response = await fetch(config.uploadUrl, {
+        method: config.method || 'POST',
+        body: formData
+      });
+      const text = await response.text();
+      let payload;
+
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        throw new Error('MCP ZIP 上传返回了非 JSON 响应: ' + text.slice(0, 200));
+      }
+
+      if (!response.ok || !payload.ok || !payload.bundle) {
+        throw new Error(payload.error || 'MCP ZIP 上传失败');
+      }
+
+      return payload.bundle;
+    }
+
+    async function uploadBundleFile(file) {
+      const directUploadConfig = getBundleUploadConfig();
+
+      if (directUploadConfig?.uploadUrl) {
+        setOutput('正在直接上传 ZIP 到 MCP...');
+        return uploadBundleDirectlyToMcp(file, directUploadConfig);
+      }
+
+      throw new Error('MCP 未返回 ZIP 直传地址，请重新调用 wechat_open_asset_bundle_upload 打开上传界面');
+    }
+
     async function uploadToChatGPT(file) {
       if (!window.openai?.uploadFile) {
         throw new Error('当前环境不支持 window.openai.uploadFile');
@@ -212,8 +264,7 @@ function getChatGPTAssetWidgetHtml(): string {
       runWithButton(event.currentTarget, async () => {
         const file = document.getElementById('bundleFile').files?.[0];
         if (!file) throw new Error('请先选择 ZIP 素材包');
-        setOutput('正在上传 ZIP 到 ChatGPT...');
-        const bundle = await uploadToChatGPT(file);
+        const bundle = await uploadBundleFile(file);
         setOutput('正在调用 MCP 处理素材包...');
         await callTool('wechat_process_article_bundle_from_chatgpt_file', {
           directoryId: directoryIdInput.value || undefined,
@@ -257,6 +308,9 @@ function getChatGPTAssetWidgetHtml(): string {
 }
 
 export function registerChatGPTAssetWidgetResource(server: McpServer): void {
+  const publicBaseUrl = getMcpPublicBaseUrl();
+  const connectDomains = publicBaseUrl ? [publicBaseUrl] : [];
+
   server.registerResource(
     'wechat-chatgpt-asset-upload-widget',
     CHATGPT_ASSET_WIDGET_URI,
@@ -265,10 +319,17 @@ export function registerChatGPTAssetWidgetResource(server: McpServer): void {
       description: '在 ChatGPT 中上传公众号文章 ZIP 素材包或替换单张图片。',
       mimeType: 'text/html',
       _meta: {
+        ui: {
+          prefersBorder: true,
+          csp: {
+            connectDomains,
+            resourceDomains: [],
+          },
+        },
         'openai/widgetDescription': '上传 ChatGPT 生成的微信公众号文章素材包，并把图片批量上传到微信公众号。',
         'openai/widgetPrefersBorder': true,
         'openai/widgetCSP': {
-          connect_domains: [],
+          connect_domains: connectDomains,
           resource_domains: [],
         },
       },

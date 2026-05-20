@@ -2,12 +2,19 @@ import { z } from 'zod';
 import { McpTool, WechatApiClient, WechatToolResult } from '../types.js';
 import {
   getArticleWorkspace,
+  CHATGPT_BUNDLE_UPLOAD_ENDPOINT,
+  getMaxChatGPTAssetZipBytes,
   processArticleBundleFromChatGPTFile,
   uploadWorkspaceImageFromChatGPTFile,
   type ChatGPTFileRef,
   type ChatGPTAssetRole,
 } from '../../utils/chatgpt-assets.js';
 import { logger } from '../../utils/logger.js';
+import {
+  buildImageUploadTicketUrl,
+  createImageUploadTicket,
+} from '../../utils/image-upload-ticket.js';
+import { CHATGPT_ASSET_WIDGET_URI } from './chatgpt-asset-widget.js';
 
 const chatGPTFileRefSchema = z.object({
   file_id: z.string().optional(),
@@ -110,9 +117,14 @@ function jsonText(payload: unknown): string {
   return JSON.stringify(payload, null, 2);
 }
 
-function toolResult(payload: Record<string, unknown>, textPrefix?: string): WechatToolResult {
+function toolResult(
+  payload: Record<string, unknown>,
+  textPrefix?: string,
+  meta?: Record<string, unknown>,
+): WechatToolResult {
   return {
     structuredContent: payload,
+    _meta: meta,
     content: [{
       type: 'text',
       text: textPrefix ? `${textPrefix}\n${jsonText(payload)}` : jsonText(payload),
@@ -140,6 +152,20 @@ async function handleOpenAssetBundleUpload(args: unknown): Promise<WechatToolRes
     directoryId: z.string().optional(),
     topicSlug: z.string().optional(),
   }).parse(args || {});
+  const ticket = createImageUploadTicket({ maxBytes: getMaxChatGPTAssetZipBytes() });
+  const uploadUrl = buildImageUploadTicketUrl(ticket.token, CHATGPT_BUNDLE_UPLOAD_ENDPOINT);
+  const bundleUpload = uploadUrl
+    ? {
+        uploadUrl,
+        method: 'POST',
+        contentType: 'multipart/form-data',
+        formField: 'file',
+        maxBytes: ticket.maxBytes,
+        allowedExtensions: ['zip'],
+        expiresAt: new Date(ticket.expiresAt).toISOString(),
+        oneTime: true,
+      }
+    : undefined;
 
   return toolResult({
     ok: true,
@@ -152,7 +178,7 @@ async function handleOpenAssetBundleUpload(args: unknown): Promise<WechatToolRes
       imageReferenceRule: '正文必须使用 asset://image/<assetId>，manifest.images[].id 必须与正文引用一一对应。',
       directoryRule: '首次上传后会返回 directoryId，后续重传 ZIP 或替换单图必须继续传该 directoryId。',
     },
-  }, '已打开 ChatGPT 公众号素材包上传界面。');
+  }, '已打开 ChatGPT 公众号素材包上传界面。', bundleUpload ? { chatgptBundleUpload: bundleUpload } : undefined);
 }
 
 async function handleGetChatGPTArticleWorkflow(args: unknown): Promise<WechatToolResult> {
@@ -395,7 +421,10 @@ export const openAssetBundleUploadTool: McpTool = {
     openWorldHint: false,
   },
   _meta: {
-    'openai/outputTemplate': 'ui://wechat/chatgpt-asset-upload.html',
+    ui: {
+      resourceUri: CHATGPT_ASSET_WIDGET_URI,
+    },
+    'openai/outputTemplate': CHATGPT_ASSET_WIDGET_URI,
     'openai/widgetAccessible': true,
     'openai/toolInvocation/invoking': '正在打开素材包上传界面...',
     'openai/toolInvocation/invoked': '素材包上传界面已打开',

@@ -93,13 +93,32 @@ export interface ChatGPTWorkspaceResult {
   };
 }
 
+export interface UploadedChatGPTBundleFile {
+  fileId: string;
+  fileName: string;
+  mimeType?: string;
+  buffer: Buffer;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export type ConsumeUploadedChatGPTBundleResult =
+  | { ok: true; file: UploadedChatGPTBundleFile }
+  | { ok: false; reason: 'missing_token' | 'not_found' | 'expired' | 'file_id_mismatch' };
+
 const DEFAULT_CHATGPT_ASSETS_BASE = '~/wechat-official-account-mcp/temp/chatgpt';
 const DEFAULT_MAX_ZIP_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_UNZIPPED_BYTES = 128 * 1024 * 1024;
 const DEFAULT_MAX_ZIP_FILES = 200;
+const DEFAULT_UPLOADED_BUNDLE_TTL_SECONDS = 5 * 60;
 
 const WORKSPACE_FILE = 'workspace.json';
 const WECHAT_ASSETS_FILE = 'wechat-assets.json';
+export const CHATGPT_BUNDLE_UPLOAD_ENDPOINT = '/chatgpt-assets/upload-bundle';
+export const CHATGPT_BUNDLE_DOWNLOAD_ENDPOINT = '/chatgpt-assets/files';
+export const CHATGPT_BUNDLE_DOWNLOAD_TOKEN_QUERY_KEY = 'download_token';
+
+const uploadedChatGPTBundles = new Map<string, UploadedChatGPTBundleFile & { token: string }>();
 
 type ExtractedZipEntry = {
   relativePath: string;
@@ -123,7 +142,7 @@ export function getChatGPTAssetsBaseDir(): string {
   return path.resolve(expandHome(configured));
 }
 
-function getMaxZipBytes(): number {
+export function getMaxChatGPTAssetZipBytes(): number {
   return Number(process.env.CHATGPT_ASSETS_MAX_ZIP_BYTES || DEFAULT_MAX_ZIP_BYTES);
 }
 
@@ -137,6 +156,87 @@ function getMaxZipFiles(): number {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function cleanupExpiredUploadedChatGPTBundles(now = Date.now()): void {
+  for (const [fileId, file] of uploadedChatGPTBundles.entries()) {
+    if (file.expiresAt <= now) {
+      uploadedChatGPTBundles.delete(fileId);
+    }
+  }
+}
+
+export function createUploadedChatGPTBundleFileRef(input: {
+  publicBaseUrl: string;
+  buffer: Buffer;
+  fileName?: string;
+  mimeType?: string;
+  ttlSeconds?: number;
+  now?: number;
+}): ChatGPTFileRef & { expires_at: string } {
+  const now = input.now ?? Date.now();
+  const ttlSeconds = input.ttlSeconds ?? DEFAULT_UPLOADED_BUNDLE_TTL_SECONDS;
+  const fileId = `chatgpt_bundle_${crypto.randomUUID().replace(/-/g, '')}`;
+  const token = crypto.randomBytes(32).toString('base64url');
+  const fileName = input.fileName || 'chatgpt-article-bundle.zip';
+  const expiresAt = now + ttlSeconds * 1000;
+  const normalizedBaseUrl = input.publicBaseUrl.replace(/\/+$/, '');
+  const downloadUrl = new URL(`${normalizedBaseUrl}${CHATGPT_BUNDLE_DOWNLOAD_ENDPOINT}/${fileId}`);
+
+  downloadUrl.searchParams.set(CHATGPT_BUNDLE_DOWNLOAD_TOKEN_QUERY_KEY, token);
+  cleanupExpiredUploadedChatGPTBundles(now);
+  uploadedChatGPTBundles.set(fileId, {
+    fileId,
+    token,
+    fileName,
+    mimeType: input.mimeType,
+    buffer: input.buffer,
+    createdAt: now,
+    expiresAt,
+  });
+
+  return {
+    file_id: fileId,
+    download_url: downloadUrl.toString(),
+    file_name: fileName,
+    mime_type: input.mimeType || 'application/zip',
+    expires_at: new Date(expiresAt).toISOString(),
+  };
+}
+
+export function consumeUploadedChatGPTBundleFile(
+  fileId: string,
+  token?: string,
+  now = Date.now(),
+): ConsumeUploadedChatGPTBundleResult {
+  cleanupExpiredUploadedChatGPTBundles(now);
+
+  if (!token) {
+    return { ok: false, reason: 'missing_token' };
+  }
+
+  const file = uploadedChatGPTBundles.get(fileId);
+  if (!file) {
+    return { ok: false, reason: 'not_found' };
+  }
+
+  uploadedChatGPTBundles.delete(fileId);
+
+  if (file.fileId !== fileId) {
+    return { ok: false, reason: 'file_id_mismatch' };
+  }
+
+  if (file.expiresAt <= now) {
+    return { ok: false, reason: 'expired' };
+  }
+
+  if (file.token !== token) {
+    return { ok: false, reason: 'not_found' };
+  }
+
+  const { token: _token, ...safeFile } = file;
+  void _token;
+  return { ok: true, file: safeFile };
 }
 
 function createDirectoryId(): string {
@@ -740,7 +840,7 @@ export async function processArticleBundleFromChatGPTFile(input: {
   await fs.mkdir(stagingDir, { recursive: true });
 
   try {
-    const zipBuffer = await downloadChatGPTFile(input.bundle, getMaxZipBytes());
+    const zipBuffer = await downloadChatGPTFile(input.bundle, getMaxChatGPTAssetZipBytes());
     const entries = extractZipEntries(zipBuffer);
     await writeExtractedEntries(stagingDir, entries);
 
