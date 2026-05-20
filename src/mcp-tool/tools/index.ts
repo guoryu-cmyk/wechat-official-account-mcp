@@ -17,6 +17,7 @@ import { autoReplyMcpTool } from './auto-reply-tool.js';
 import { massSendMcpTool } from './mass-send-tool.js';
 import { subscribeMsgMcpTool } from './subscribe-msg-tool.js';
 import {
+  getChatGPTArticleWorkflowTool,
   getArticleWorkspaceTool,
   openAssetBundleUploadTool,
   processArticleBundleFromChatGPTFileTool,
@@ -38,12 +39,13 @@ export const wechatTools: WechatToolDefinition[] = [
 export const mcpTools: McpTool[] = [
   // 基础功能
   authMcpTool,
-  draftMcpTool,
-  publishMcpTool,
+  getChatGPTArticleWorkflowTool,
   openAssetBundleUploadTool,
   processArticleBundleFromChatGPTFileTool,
   uploadWorkspaceImageFromChatGPTFileTool,
   getArticleWorkspaceTool,
+  draftMcpTool,
+  publishMcpTool,
   permanentMediaTool,
   mediaUploadTool,
   stageImageUploadTool,
@@ -89,6 +91,7 @@ export {
   statisticsMcpTool,
   autoReplyMcpTool,
   massSendMcpTool,
+  getChatGPTArticleWorkflowTool,
   getArticleWorkspaceTool,
   openAssetBundleUploadTool,
   processArticleBundleFromChatGPTFileTool,

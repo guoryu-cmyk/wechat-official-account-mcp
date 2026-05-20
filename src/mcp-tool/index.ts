@@ -49,7 +49,11 @@ export class WechatMcpTool {
       this.initialize();
     }
 
-    return mcpTools.filter(tool => this.enabledTools.includes(tool.name));
+    const toolsByName = new Map(mcpTools.map(tool => [tool.name, tool]));
+
+    return this.enabledTools
+      .map(name => toolsByName.get(name))
+      .filter((tool): tool is McpTool => Boolean(tool));
   }
 
   /**

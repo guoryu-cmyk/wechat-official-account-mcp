@@ -33,6 +33,10 @@ const getWorkspaceSchema = z.object({
   directoryId: z.string().describe('MCP 返回的不透明目录 ID。'),
 });
 
+const workflowSchema = z.object({
+  intent: z.string().optional().describe('用户当前想了解或执行的公众号图文流程，可为空。'),
+});
+
 function jsonText(payload: unknown): string {
   return JSON.stringify(payload, null, 2);
 }
@@ -80,6 +84,100 @@ async function handleOpenAssetBundleUpload(args: unknown): Promise<WechatToolRes
       directoryRule: '首次上传后会返回 directoryId，后续重传 ZIP 或替换单图必须继续传该 directoryId。',
     },
   }, '已打开 ChatGPT 公众号素材包上传界面。');
+}
+
+async function handleGetChatGPTArticleWorkflow(args: unknown): Promise<WechatToolResult> {
+  const params = workflowSchema.parse(args || {});
+  const workflow = {
+    ok: true,
+    intent: params.intent,
+    summary: 'ChatGPT 生成公众号图文时，应先生成文章、图片和 manifest.json，打包成 ZIP，由用户在上传 Widget 中上传，然后 MCP 按 assetId 精确上传图片并返回可创建草稿的数据。',
+    recommendedFlow: [
+      {
+        step: 1,
+        actor: 'ChatGPT',
+        action: '生成 article.md 或 article.html、配图和 manifest.json。',
+      },
+      {
+        step: 2,
+        actor: 'ChatGPT',
+        action: '正文里的每张图片都使用 asset://image/<assetId> 引用，不使用文件顺序猜图。',
+      },
+      {
+        step: 3,
+        actor: 'ChatGPT',
+        action: '把 manifest.json、文章文件和 images/ 目录打包成一个 ZIP，交给用户下载。',
+      },
+      {
+        step: 4,
+        actor: 'ChatGPT',
+        action: '调用 wechat_open_asset_bundle_upload 打开上传 Widget，让用户上传这个 ZIP。',
+      },
+      {
+        step: 5,
+        actor: 'Widget/MCP',
+        action: 'Widget 上传 ZIP 后调用 wechat_process_article_bundle_from_chatgpt_file。MCP 会创建或覆盖 directoryId 对应的主题目录。',
+      },
+      {
+        step: 6,
+        actor: 'MCP',
+        action: 'MCP 解压 ZIP、校验 manifest、校验 sha256、上传 inline 图片获取 wechatUrl、上传 cover 获取 mediaId。',
+      },
+      {
+        step: 7,
+        actor: 'ChatGPT',
+        action: '使用返回的 nextTool.arguments 或 draftArticle 调用 wechat_draft 创建草稿。',
+      },
+      {
+        step: 8,
+        actor: 'ChatGPT',
+        action: '同一主题后续重传 ZIP、替换单图、查看状态、创建草稿时都继续传 MCP 返回的 directoryId。',
+      },
+    ],
+    zipLayout: {
+      requiredFiles: [
+        'manifest.json',
+        'article.md 或 article.html',
+        'images/cover.png',
+        'images/<inline-image>.png',
+      ],
+      exampleArticleReference: '![流程图](asset://image/process-diagram)',
+      manifestExample: {
+        topicSlug: 'ai-agent-wechat-article',
+        article: 'article.md',
+        title: '文章标题',
+        author: '作者',
+        digest: '摘要',
+        images: [
+          {
+            id: 'cover',
+            path: 'images/cover.png',
+            role: 'cover',
+            sha256: '<optional sha256>',
+          },
+          {
+            id: 'process-diagram',
+            path: 'images/process-diagram.png',
+            role: 'inline',
+            sha256: '<optional sha256>',
+          },
+        ],
+      },
+    },
+    rules: [
+      '图片身份以 manifest.images[].id 为准。',
+      '正文只引用 asset://image/<assetId>，MCP 只按 assetId 替换为微信 URL。',
+      'cover 图片返回 mediaId，用作草稿 thumbMediaId。',
+      'inline 图片返回 wechatUrl，用作正文 img src。',
+      '首次处理返回 directoryId；后续同一篇文章必须复用该 directoryId。',
+    ],
+    nextTool: {
+      name: 'wechat_open_asset_bundle_upload',
+      arguments: {},
+    },
+  };
+
+  return toolResult(workflow, '这是 ChatGPT 创建微信公众号图文草稿的推荐流程。');
 }
 
 async function handleProcessArticleBundle(
@@ -156,6 +254,36 @@ const workspaceOutputSchema = {
   failed: z.array(z.record(z.unknown())).optional(),
   nextTool: z.record(z.unknown()).optional(),
   error: z.string().optional(),
+};
+
+const workflowOutputSchema = {
+  ok: z.boolean(),
+  intent: z.string().optional(),
+  summary: z.string(),
+  recommendedFlow: z.array(z.record(z.unknown())),
+  zipLayout: z.record(z.unknown()),
+  rules: z.array(z.string()),
+  nextTool: z.record(z.unknown()),
+};
+
+export const getChatGPTArticleWorkflowTool: McpTool = {
+  name: 'wechat_get_chatgpt_article_workflow',
+  title: '查看 ChatGPT 公众号图文流程',
+  description: [
+    'Use this when the user asks how to create a WeChat Official Account article draft from ChatGPT, asks what the flow is, or seems unsure which WeChat tool to call first.',
+    'This read-only tool explains the exact ChatGPT ZIP bundle workflow, manifest format, assetId mapping rules, directoryId reuse rule, and the next tool to call.',
+    'Call this before answering workflow questions or before starting a new ChatGPT-generated article draft flow.',
+  ].join('\n'),
+  inputSchema: {
+    intent: z.string().optional().describe('用户当前想了解或执行的公众号图文流程，可为空。'),
+  },
+  outputSchema: workflowOutputSchema,
+  annotations: {
+    readOnlyHint: true,
+    destructiveHint: false,
+    openWorldHint: false,
+  },
+  handler: handleGetChatGPTArticleWorkflow,
 };
 
 export const openAssetBundleUploadTool: McpTool = {
