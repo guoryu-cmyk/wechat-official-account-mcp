@@ -16,6 +16,12 @@ import { statisticsMcpTool } from './statistics-tool.js';
 import { autoReplyMcpTool } from './auto-reply-tool.js';
 import { massSendMcpTool } from './mass-send-tool.js';
 import { subscribeMsgMcpTool } from './subscribe-msg-tool.js';
+import {
+  getArticleWorkspaceTool,
+  openAssetBundleUploadTool,
+  processArticleBundleFromChatGPTFileTool,
+  uploadWorkspaceImageFromChatGPTFileTool,
+} from './chatgpt-asset-tools.js';
 
 /**
  * 所有微信公众号 MCP 工具
@@ -34,6 +40,10 @@ export const mcpTools: McpTool[] = [
   authMcpTool,
   draftMcpTool,
   publishMcpTool,
+  openAssetBundleUploadTool,
+  processArticleBundleFromChatGPTFileTool,
+  uploadWorkspaceImageFromChatGPTFileTool,
+  getArticleWorkspaceTool,
   permanentMediaTool,
   mediaUploadTool,
   stageImageUploadTool,
@@ -79,5 +89,9 @@ export {
   statisticsMcpTool,
   autoReplyMcpTool,
   massSendMcpTool,
+  getArticleWorkspaceTool,
+  openAssetBundleUploadTool,
+  processArticleBundleFromChatGPTFileTool,
+  uploadWorkspaceImageFromChatGPTFileTool,
   subscribeMsgMcpTool,
 };

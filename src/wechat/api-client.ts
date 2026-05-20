@@ -220,6 +220,38 @@ export class WechatApiClient {
   }
 
   /**
+   * 上传永久素材。
+   *
+   * 草稿封面需要可长期引用的 media_id，不能复用正文 uploadimg 返回的 URL。
+   * 这里统一携带 form-data 头，避免通用 post() 丢失 multipart boundary。
+   */
+  async uploadPermanentMaterial(
+    type: 'image' | 'voice' | 'video' | 'thumb',
+    formData: FormData,
+  ): Promise<{ media_id: string; url?: string; errcode?: number; errmsg?: string }> {
+    try {
+      const response = await this.httpClient.post(
+        `/cgi-bin/material/add_material?type=${type}`,
+        formData,
+        {
+          headers: {
+            ...formData.getHeaders(),
+          },
+        }
+      );
+
+      if (response.data.errcode && response.data.errcode !== 0) {
+        throw new Error(`Permanent material upload failed: ${response.data.errmsg} (${response.data.errcode})`);
+      }
+
+      return response.data;
+    } catch (error) {
+      logger.error('Failed to upload permanent material:', (error as any)?.message ?? String(error));
+      throw error;
+    }
+  }
+
+  /**
    * 通用 GET 请求
    */
   async get(path: string, params?: Record<string, unknown>): Promise<unknown> {

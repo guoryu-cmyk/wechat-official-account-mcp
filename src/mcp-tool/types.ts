@@ -1,6 +1,8 @@
 import { WechatApiClient } from '../wechat/api-client.js';
 import { AuthManager } from '../auth/auth-manager.js';
 import { ZodRawShape } from 'zod';
+import { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
+import { ServerNotification, ServerRequest, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 
 // 重新导出 WechatApiClient 类型
 export { WechatApiClient };
@@ -26,6 +28,8 @@ export interface WechatToolResult {
   }>;
   isError?: boolean;
 }
+
+export type McpToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
 /**
  * 工具执行上下文
@@ -58,15 +62,23 @@ export interface WechatToolDefinition {
 /**
  * MCP工具处理器类型
  */
-export type McpToolHandler = (params: unknown, apiClient: WechatApiClient) => Promise<WechatToolResult>;
+export type McpToolHandler = (
+  params: unknown,
+  apiClient: WechatApiClient,
+  extra?: McpToolExtra,
+) => Promise<WechatToolResult>;
 
 /**
  * MCP工具定义
  */
 export interface McpTool {
   name: string;
+  title?: string;
   description: string;
   inputSchema: ZodRawShape;
+  outputSchema?: ZodRawShape;
+  annotations?: ToolAnnotations;
+  _meta?: Record<string, unknown>;
   handler: McpToolHandler;
 }
 

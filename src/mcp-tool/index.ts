@@ -4,6 +4,7 @@ import { AuthManager } from '../auth/auth-manager.js';
 import { logger } from '../utils/logger.js';
 import { wechatTools, mcpTools } from './tools/index.js';
 import { WechatToolResult, WechatToolArgs, McpTool } from './types.js';
+import { registerChatGPTAssetWidgetResource } from './tools/chatgpt-asset-widget.js';
 
 /**
  * 微信公众号 MCP 工具管理器
@@ -47,7 +48,8 @@ export class WechatMcpTool {
     if (!this.initialized) {
       this.initialize();
     }
-    return mcpTools;
+
+    return mcpTools.filter(tool => this.enabledTools.includes(tool.name));
   }
 
   /**
@@ -107,15 +109,21 @@ export class WechatMcpTool {
 
     // Register each tool individually
     const tools = this.getTools();
+
+    registerChatGPTAssetWidgetResource(server);
     
     for (const tool of tools) {
       server.registerTool(
         tool.name,
         {
+          title: tool.title,
           description: tool.description,
-          inputSchema: tool.inputSchema
+          inputSchema: tool.inputSchema,
+          outputSchema: tool.outputSchema,
+          annotations: tool.annotations,
+          _meta: tool._meta,
         },
-        async (params: unknown) => {
+        async (params: unknown, extra) => {
           try {
             logger.debug(`[WechatMcpTool] Calling tool: ${tool.name}`);
             logger.debug(`[WechatMcpTool] Params type: ${typeof params}`);
@@ -123,7 +131,7 @@ export class WechatMcpTool {
             // 不记录完整的参数内容,可能包含敏感信息
             // logger.debug(`[WechatMcpTool] Params:`, JSON.stringify(params, null, 2));
 
-            const result = await tool.handler(params, this.apiClient);
+            const result = await tool.handler(params, this.apiClient, extra);
             logger.debug(`[WechatMcpTool] Tool ${tool.name} executed successfully`);
             return result;
           } catch (error) {
@@ -139,7 +147,6 @@ export class WechatMcpTool {
       );
     }
 
-    this.enabledTools = tools.map(tool => tool.name);
     logger.info(`[WechatMcpTool] Registered ${tools.length} tools to MCP server`);
   }
 

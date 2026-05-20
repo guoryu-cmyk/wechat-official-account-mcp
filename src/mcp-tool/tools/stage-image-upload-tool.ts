@@ -140,6 +140,7 @@ async function handleStageImageUploadTool(
 export const stageImageUploadTool: McpTool = {
   name: 'wechat_stage_image_upload',
   description: [
+    'Do not use this in ChatGPT Apps when a ZIP article bundle is available. Prefer wechat_open_asset_bundle_upload and wechat_process_article_bundle_from_chatgpt_file for ChatGPT-generated article assets.',
     '当 ChatGPT/远程 SSE 环境无法直接 HTTP POST /upload-image 时，用本工具通过 MCP 分片上传本地图片到服务器临时目录。',
     `调用流程：action=start 创建会话；把图片 base64 按返回的 chunkSizeBase64Chars 切块；推荐每片 ${IMAGE_UPLOAD_CHUNK_BASE64_CHARS} 个 base64 字符，单片最多 ${IMAGE_UPLOAD_MAX_CHUNK_BASE64_CHARS} 个 base64 字符；action=finish 返回服务器 filePath；最后调用 wechat_upload_img。`,
     '如果完整图片 base64 长度不超过 maxChunkBase64Chars，可以只调用一次 action=append；需要多片时，除最后一片外应尽量切满 chunkSizeBase64Chars，不要故意拆成很多小分片。',

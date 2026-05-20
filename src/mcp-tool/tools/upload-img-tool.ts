@@ -121,6 +121,8 @@ async function handleUploadImgTool(args: unknown, apiClient: WechatApiClient): P
 export const uploadImgTool: McpTool = {
   name: 'wechat_upload_img',
   description: [
+    'Do not use this as the primary ChatGPT Apps upload path. When ChatGPT has a ZIP article bundle, prefer wechat_open_asset_bundle_upload and wechat_process_article_bundle_from_chatgpt_file.',
+    'This tool is a lower-level fallback for MCP-server-local filePath or small base64 uploads after the caller already has an image on the MCP server.',
     '远程 ChatGPT/SSE 上传本地图片时：优先调用 wechat_stage_image_upload 分片上传生成服务器 filePath，再调用本工具；不要直接传长 base64。',
     '只有客户端能直接访问外部 HTTP 上传地址时，才可改用 wechat_prepare_image_upload 生成 uploadUrl。',
     '上传微信公众号图文消息正文内使用的图片，并返回可写入文章 HTML 的图片 URL；不占用公众号永久素材库限制。',

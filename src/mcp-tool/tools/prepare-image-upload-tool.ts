@@ -102,6 +102,7 @@ async function handlePrepareImageUploadTool(
 export const prepareImageUploadTool: McpTool = {
   name: 'wechat_prepare_image_upload',
   description: [
+    'Do not use this in ChatGPT Apps when a ZIP article bundle is available. Prefer wechat_open_asset_bundle_upload and wechat_process_article_bundle_from_chatgpt_file for ChatGPT-generated article assets.',
     '仅当客户端能直接执行外部 HTTP POST 时，调用本工具生成短期一次性 uploadUrl。',
     '如果 ChatGPT 执行 curl 出现 DNS 失败、Failed to connect、HTTP_STATUS:000 等网络错误，请改用 wechat_stage_image_upload 分片上传。',
     '拿到 uploadUrl 后，用 multipart/form-data 的 file 字段上传 JPG/JPEG/PNG 图片；上传响应会返回服务器 filePath。',
