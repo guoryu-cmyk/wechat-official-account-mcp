@@ -400,6 +400,11 @@ function validateManifest(rawManifest: ChatGPTArticleManifest): ChatGPTArticleMa
     }
   }
 
+  const coverImages = rawManifest.images.filter(image => image.role === 'cover');
+  if (coverImages.length !== 1) {
+    throw new Error('manifest.json 必须且只能声明一张 role=cover 的封面图，用于草稿 thumbMediaId');
+  }
+
   return rawManifest;
 }
 

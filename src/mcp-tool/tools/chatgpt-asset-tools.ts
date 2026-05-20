@@ -37,6 +37,75 @@ const workflowSchema = z.object({
   intent: z.string().optional().describe('用户当前想了解或执行的公众号图文流程，可为空。'),
 });
 
+const articleBundleContract = {
+  contractVersion: 'wechat-chatgpt-article-bundle/v1',
+  purpose: '让 ChatGPT 生成的公众号文章、图片与 MCP 上传解析保持一致。',
+  zipRootLayout: {
+    required: [
+      'manifest.json',
+      'article.md 或 article.html',
+      'images/',
+    ],
+    example: [
+      'manifest.json',
+      'article.md',
+      'images/cover.png',
+      'images/process-diagram.png',
+      'images/product-shot.png',
+    ],
+  },
+  articleRules: [
+    '文章正文里的图片必须写成 asset://image/<assetId>。',
+    'assetId 必须与 manifest.images[].id 完全一致。',
+    '不要在正文里引用 images/*.png、相对路径、绝对路径或第几张图。',
+    'Markdown 示例：![流程图](asset://image/process-diagram)',
+    'HTML 示例：<img src="asset://image/process-diagram" alt="流程图" />',
+  ],
+  manifestSchema: {
+    topicSlug: 'string，可选，ChatGPT 生成的人类可读主题 slug',
+    article: 'string，必填，文章文件路径，例如 article.md',
+    title: 'string，建议必填，草稿标题',
+    author: 'string，可选',
+    digest: 'string，可选，草稿摘要',
+    contentSourceUrl: 'string，可选，原文链接',
+    images: [
+      {
+        id: 'string，必填，稳定图片 ID，只能使用字母、数字、下划线、短横线',
+        path: 'string，必填，ZIP 内图片路径，例如 images/cover.png',
+        role: 'cover 或 inline；必须且只能有一张 cover',
+        sha256: 'string，可选，图片 sha256，用于完整性校验',
+      },
+    ],
+  },
+  manifestExample: {
+    topicSlug: 'ai-agent-wechat-article',
+    article: 'article.md',
+    title: 'AI Agent 如何提升公众号内容生产效率',
+    author: 'ChatGPT',
+    digest: '一篇介绍 AI Agent 内容生产流程的图文文章。',
+    images: [
+      {
+        id: 'cover',
+        path: 'images/cover.png',
+        role: 'cover',
+        sha256: '<optional sha256>',
+      },
+      {
+        id: 'process-diagram',
+        path: 'images/process-diagram.png',
+        role: 'inline',
+        sha256: '<optional sha256>',
+      },
+      {
+        id: 'product-shot',
+        path: 'images/product-shot.png',
+        role: 'inline',
+        sha256: '<optional sha256>',
+      },
+    ],
+  },
+};
+
 function jsonText(payload: unknown): string {
   return JSON.stringify(payload, null, 2);
 }
@@ -92,6 +161,15 @@ async function handleGetChatGPTArticleWorkflow(args: unknown): Promise<WechatToo
     ok: true,
     intent: params.intent,
     summary: 'ChatGPT 生成公众号图文时，应先生成文章、图片和 manifest.json，打包成 ZIP，由用户在上传 Widget 中上传，然后 MCP 按 assetId 精确上传图片并返回可创建草稿的数据。',
+    bundleContract: articleBundleContract,
+    generationInstructions: [
+      '在开始生成公众号图文文章时，先调用本工具读取 bundleContract。',
+      '生成文章文件时，所有图片位置必须使用 asset://image/<assetId> 占位。',
+      '每生成一张图片，就为它分配稳定 assetId，并在 manifest.images 中记录 id、path、role。',
+      '必须生成一张且只能一张 role=cover 的封面图。',
+      '把 manifest.json、文章文件和 images/ 目录一起打包成 ZIP。',
+      '打开上传 Widget 前，先确认 ZIP 根目录直接包含 manifest.json，不要再套一层父目录。',
+    ],
     recommendedFlow: [
       {
         step: 1,
@@ -170,6 +248,14 @@ async function handleGetChatGPTArticleWorkflow(args: unknown): Promise<WechatToo
       'cover 图片返回 mediaId，用作草稿 thumbMediaId。',
       'inline 图片返回 wechatUrl，用作正文 img src。',
       '首次处理返回 directoryId；后续同一篇文章必须复用该 directoryId。',
+    ],
+    validationChecklist: [
+      'ZIP 根目录存在 manifest.json。',
+      'manifest.article 指向的 article.md 或 article.html 真实存在。',
+      'manifest.images 中必须且只能有一个 role=cover。',
+      'article 中每个 asset://image/<id> 都能在 manifest.images[].id 找到。',
+      'manifest.images[].path 指向的图片真实存在，且图片是 jpg/jpeg/png。',
+      '不要根据图片文件名或文件顺序推断正文图片位置。',
     ],
     nextTool: {
       name: 'wechat_open_asset_bundle_upload',
@@ -260,9 +346,12 @@ const workflowOutputSchema = {
   ok: z.boolean(),
   intent: z.string().optional(),
   summary: z.string(),
+  bundleContract: z.record(z.unknown()),
+  generationInstructions: z.array(z.string()),
   recommendedFlow: z.array(z.record(z.unknown())),
   zipLayout: z.record(z.unknown()),
   rules: z.array(z.string()),
+  validationChecklist: z.array(z.string()),
   nextTool: z.record(z.unknown()),
 };
 
@@ -272,6 +361,7 @@ export const getChatGPTArticleWorkflowTool: McpTool = {
   description: [
     'Use this when the user asks how to create a WeChat Official Account article draft from ChatGPT, asks what the flow is, or seems unsure which WeChat tool to call first.',
     'This read-only tool explains the exact ChatGPT ZIP bundle workflow, manifest format, assetId mapping rules, directoryId reuse rule, and the next tool to call.',
+    'Call this before generating article files so ChatGPT can create the ZIP root layout, manifest.json, cover image, and asset://image/<assetId> references exactly as MCP expects.',
     'Call this before answering workflow questions or before starting a new ChatGPT-generated article draft flow.',
   ].join('\n'),
   inputSchema: {
