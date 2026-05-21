@@ -312,7 +312,7 @@ async function handleOpenAssetBundleUpload(args: unknown): Promise<WechatToolRes
       imageReferenceRule: '正文必须使用 asset://image/<assetId>，manifest.images[].id 必须与正文引用一一对应。',
       directoryRule: '首次上传后会返回 directoryId，后续重传 ZIP 或替换单图必须继续传该 directoryId。',
       draftDecisionRule: '用户在 Widget 中确认图片后，可以选择让 ChatGPT 创建新草稿，或带着已有草稿 media_id 更新原草稿。',
-      chatGPTFileLibraryRule: '如果 Widget 支持 ChatGPT 文件库选择器，用户可以直接从 ChatGPT 文件库选择 ZIP 或替换图片；不支持时再使用本地上传兜底。',
+      chatGPTFileLibraryRule: '如果 Widget 文件库弹窗不能选中 ZIP，请让用户先在 ChatGPT 输入框用“添加/资料库”把 ZIP 加到当前对话，再由 ChatGPT 用 bundle 文件参数直接调用 wechat_process_article_bundle_from_chatgpt_file。',
     },
   }, '已打开 ChatGPT 公众号素材包上传界面。', bundleUpload ? { chatgptBundleUpload: bundleUpload } : undefined);
 }
@@ -332,7 +332,7 @@ async function handleGetChatGPTArticleWorkflow(args: unknown): Promise<WechatToo
       '必须生成一张且只能一张 role=cover 的封面图。',
       '把 manifest.json、文章文件和 images/ 目录一起打包成 ZIP。',
       '打开上传 Widget 前，先确认 ZIP 根目录直接包含 manifest.json，不要再套一层父目录。',
-      '打开 Widget 后，如果 ChatGPT 文件库里已经有生成好的 ZIP，优先让用户点击“从 ChatGPT 文件库选择 ZIP”；只有文件库选择器不可用时才让用户下载后本地上传。',
+      '打开 Widget 后，如果 Widget 文件库弹窗不能选中 ZIP，不要让用户下载到本地；应让用户在 ChatGPT 输入框通过“添加/资料库”把 ZIP 加到当前对话，然后使用该对话附件作为 bundle 文件参数直接调用处理工具。',
       '用户在 Widget 中替换图片后，如果点击“创建新草稿”，后续使用 wechat_draft action=add；如果点击“更新原草稿”，后续使用 wechat_draft action=update，并使用用户提供或上下文中已有的 media_id。',
     ],
     recommendedFlow: [
@@ -359,7 +359,7 @@ async function handleGetChatGPTArticleWorkflow(args: unknown): Promise<WechatToo
       {
         step: 5,
         actor: 'Widget/MCP',
-        action: 'Widget 从 ChatGPT 文件库选择 ZIP 或本地上传 ZIP 后，调用 wechat_process_article_bundle_from_chatgpt_file。MCP 会创建或覆盖 directoryId 对应的主题目录。',
+        action: 'Widget 可处理本地 ZIP；如果 Widget 文件库弹窗不能选中 ZIP，则用户把 ZIP 从资料库添加到当前对话，ChatGPT 用该附件作为 bundle 参数调用 wechat_process_article_bundle_from_chatgpt_file。',
       },
       {
         step: 6,
@@ -555,7 +555,8 @@ export const openAssetBundleUploadTool: McpTool = {
   description: [
     'Use this when the user is working in ChatGPT and needs to upload a ZIP bundle for a WeChat Official Account article.',
     'This render tool opens the upload widget. The widget uploads the ZIP directly to the MCP signed upload endpoint, then calls wechat_process_article_bundle_from_chatgpt_file.',
-    'The widget can also pick ZIPs or replacement images from the ChatGPT file library with window.openai.selectFiles when that helper is available.',
+    'The widget can pick files with window.openai.selectFiles when that helper is available, but ZIP selection may be limited by the ChatGPT library picker in some environments.',
+    'If the widget library picker cannot select a ZIP, ask the user to attach the ZIP from the ChatGPT library to the current conversation, then call wechat_process_article_bundle_from_chatgpt_file with that attachment as the bundle file parameter.',
     'The widget lets the user select a specific asset from the returned asset list, replace that single image, and send a follow-up instruction to either create a new draft or update an existing draft.',
     'Use this as the ChatGPT entry point for article assets so the workflow stays on one directoryId-based workspace.',
   ].join('\n'),

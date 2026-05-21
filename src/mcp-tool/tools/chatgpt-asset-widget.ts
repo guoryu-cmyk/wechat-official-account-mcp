@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getMcpPublicBaseUrl } from '../../utils/image-upload-ticket.js';
 
-export const CHATGPT_ASSET_WIDGET_URI = 'ui://wechat/chatgpt-asset-upload-v6.html';
+export const CHATGPT_ASSET_WIDGET_URI = 'ui://wechat/chatgpt-asset-upload-v7.html';
 
 function getChatGPTAssetWidgetHtml(): string {
   return `<!doctype html>
@@ -250,9 +250,10 @@ function getChatGPTAssetWidgetHtml(): string {
       </label>
       <div class="button-row">
         <button id="bundleButton">处理本地 ZIP</button>
-        <button id="bundleLibraryButton">从 ChatGPT 文件库选择 ZIP</button>
+        <button id="bundleLibraryButton">从 Widget 文件库选择 ZIP</button>
+        <button id="attachedBundleButton">让 ChatGPT 处理对话 ZIP 附件</button>
       </div>
-      <p class="muted">ZIP 根目录需要包含 manifest.json、article.md 或 article.html，以及 images/ 下的图片。正文图片引用必须使用 asset://image/&lt;assetId&gt;。如果 ChatGPT 文件库选择器可用，可直接从文件库选择 ChatGPT 生成的 ZIP，不需要先下载到本地。</p>
+      <p class="muted">ZIP 根目录需要包含 manifest.json、article.md 或 article.html，以及 images/ 下的图片。正文图片引用必须使用 asset://image/&lt;assetId&gt;。如果 Widget 文件库弹窗不能选中 ZIP，请先在 ChatGPT 输入框用“添加/资料库”把 ZIP 加到当前对话，再点“让 ChatGPT 处理对话 ZIP 附件”。</p>
     </section>
 
     <details class="panel">
@@ -783,6 +784,36 @@ function getChatGPTAssetWidgetHtml(): string {
       setOutput('已让 ChatGPT 继续执行下一步。');
     }
 
+    async function askChatGPTToProcessAttachedBundle() {
+      if (!window.openai?.sendFollowUpMessage) {
+        throw new Error('当前环境不支持 window.openai.sendFollowUpMessage');
+      }
+
+      const prompt = [
+        '我已经在当前对话里从 ChatGPT 资料库/附件添加了一个微信公众号文章 ZIP 素材包。',
+        '请不要再让我下载到本地，也不要再要求我通过 Widget 文件库选择器选择 ZIP。',
+        '',
+        directoryIdInput.value.trim()
+          ? 'directoryId: ' + directoryIdInput.value.trim()
+          : 'directoryId: 首次处理可为空；如果这是同一篇文章的重传，请从上下文复用已有 directoryId。',
+        topicSlugInput.value.trim()
+          ? 'topicSlug: ' + topicSlugInput.value.trim()
+          : 'topicSlug: 如果需要，请根据当前文章主题生成。',
+        '',
+        '请使用当前对话里最新添加的 ZIP 附件作为 bundle 文件参数，调用 wechat_process_article_bundle_from_chatgpt_file。',
+        'bundle 参数必须使用 ChatGPT 提供的文件引用，也就是包含 file_id/download_url/file_name/mime_type 的对象；不要编造 download_url。',
+        '如果你看不到 ZIP 附件或无法形成 bundle 文件参数，请明确告诉我：需要先在 ChatGPT 输入框通过“添加/资料库”把 ZIP 加到当前对话。',
+        '素材处理完成后，按 MCP 返回的 nextStepGuide 继续：先读取工作区，再由我选择创建新草稿或更新原草稿。',
+        '不要调用 wechat_publish。'
+      ].join('\\n');
+
+      await window.openai.sendFollowUpMessage({
+        prompt,
+        scrollToBottom: true
+      });
+      setOutput('已让 ChatGPT 尝试处理当前对话里的 ZIP 附件。');
+    }
+
     async function runWithButton(button, task) {
       button.disabled = true;
       try {
@@ -809,6 +840,10 @@ function getChatGPTAssetWidgetHtml(): string {
         const bundle = await selectFileFromChatGPTLibrary('zip');
         await processBundleRef(bundle, 'ChatGPT 文件库 ZIP ');
       });
+    });
+
+    document.getElementById('attachedBundleButton').addEventListener('click', event => {
+      runWithButton(event.currentTarget, askChatGPTToProcessAttachedBundle);
     });
 
     document.getElementById('imageButton').addEventListener('click', event => {
