@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getMcpPublicBaseUrl } from '../../utils/image-upload-ticket.js';
 
-export const CHATGPT_ASSET_WIDGET_URI = 'ui://wechat/chatgpt-asset-upload-v5.html';
+export const CHATGPT_ASSET_WIDGET_URI = 'ui://wechat/chatgpt-asset-upload-v6.html';
 
 function getChatGPTAssetWidgetHtml(): string {
   return `<!doctype html>
@@ -492,7 +492,7 @@ function getChatGPTAssetWidgetHtml(): string {
     }
 
     function getFileRefName(fileRef) {
-      return fileRef.file_name || fileRef.fileName || fileRef.name || '';
+      return fileRef.file_name || fileRef.fileName || fileRef.filename || fileRef.name || '';
     }
 
     function getFileRefMimeType(fileRef) {
@@ -506,7 +506,11 @@ function getChatGPTAssetWidgetHtml(): string {
     function isZipFileRef(fileRef) {
       const name = getFileRefName(fileRef).toLowerCase();
       const mimeType = getFileRefMimeType(fileRef).toLowerCase();
-      return name.endsWith('.zip') || mimeType === 'application/zip' || mimeType === 'application/x-zip-compressed';
+      return name.endsWith('.zip')
+        || mimeType === 'application/zip'
+        || mimeType === 'application/x-zip-compressed'
+        || mimeType === 'application/octet-stream'
+        || mimeType.includes('zip');
     }
 
     function isImageFileRef(fileRef) {
@@ -516,8 +520,35 @@ function getChatGPTAssetWidgetHtml(): string {
     }
 
     function findCompatibleLibraryFile(files, kind) {
+      if (kind === 'zip') {
+        return files.find(isZipFileRef) || files[0];
+      }
+
       const matcher = kind === 'zip' ? isZipFileRef : isImageFileRef;
       return files.find(matcher);
+    }
+
+    function getLibraryFileName(fileRef, kind) {
+      const rawName = getFileRefName(fileRef).trim();
+      const mimeType = getFileRefMimeType(fileRef).toLowerCase();
+
+      if (kind === 'zip') {
+        return rawName || 'chatgpt-article-bundle.zip';
+      }
+
+      if (/\\.(png|jpe?g)$/i.test(rawName)) {
+        return rawName;
+      }
+
+      if (mimeType === 'image/png') {
+        return (rawName || 'chatgpt-library-image') + '.png';
+      }
+
+      if (mimeType === 'image/jpeg' || mimeType === 'image/jpg') {
+        return (rawName || 'chatgpt-library-image') + '.jpg';
+      }
+
+      return rawName || 'chatgpt-library-image';
     }
 
     async function normalizeLibraryFileRef(fileRef, kind) {
@@ -539,16 +570,15 @@ function getChatGPTAssetWidgetHtml(): string {
       const normalized = {
         file_id: fileId,
         download_url: downloadUrl,
-        file_name: getFileRefName(fileRef),
+        file_name: getLibraryFileName(fileRef, kind),
         mime_type: getFileRefMimeType(fileRef)
       };
 
-      if (kind === 'zip' && !isZipFileRef(normalized)) {
-        throw new Error('请选择 .zip 素材包');
-      }
-
       if (kind === 'image' && !isImageFileRef(normalized)) {
-        throw new Error('请选择 JPG/JPEG/PNG 图片');
+        throw new Error('请选择 JPG/JPEG/PNG 图片。当前文件: ' + JSON.stringify({
+          fileName: normalized.file_name,
+          mimeType: normalized.mime_type
+        }));
       }
 
       return normalized;
