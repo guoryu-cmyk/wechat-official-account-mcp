@@ -706,6 +706,15 @@ async function readWorkspaceAssets(directoryId: string): Promise<ChatGPTWorkspac
   return parsed.assets || [];
 }
 
+async function readWorkspaceManifest(directoryId: string): Promise<ChatGPTArticleManifest | undefined> {
+  const manifestPath = path.join(getWorkspaceDir(directoryId), 'manifest.normalized.json');
+  if (!await fileExists(manifestPath)) {
+    return undefined;
+  }
+
+  return readJson<ChatGPTArticleManifest>(manifestPath);
+}
+
 async function promoteStagingDirectory(stagingDir: string, workspaceDir: string): Promise<void> {
   const baseDir = getChatGPTAssetsBaseDir();
   const backupDir = path.join(baseDir, '.backup', `${path.basename(workspaceDir)}-${Date.now()}`);
@@ -959,15 +968,14 @@ export async function processArticleBundleFromChatGPTFile(input: {
       cover,
       assets,
       failed: [],
-      nextTool: draftArticle?.thumbMediaId
-        ? {
-            name: 'wechat_draft',
-            arguments: {
-              action: 'add',
-              articles: [draftArticle],
-            },
-          }
-        : undefined,
+      // 素材处理完成后不要直接暗示创建新草稿；ChatGPT 需要先读取最新工作区，
+      // 再根据用户在 Widget 中选择的“创建新草稿/更新原草稿”决定后续 draft 动作。
+      nextTool: {
+        name: 'wechat_get_article_workspace',
+        arguments: {
+          directoryId,
+        },
+      },
     };
   } catch (error) {
     await fs.rm(stagingDir, { recursive: true, force: true });
@@ -1058,6 +1066,11 @@ export async function uploadWorkspaceImageFromChatGPTFile(input: {
     articleHtml = articleHtml.split(existingAsset.wechatUrl).join(nextAsset.wechatUrl);
     await fs.writeFile(articleHtmlPath, articleHtml, 'utf8');
   }
+  const manifest = await readWorkspaceManifest(input.directoryId);
+  const cover = assets.find(asset => asset.role === 'cover');
+  const draftArticle = manifest && articleHtml
+    ? buildDraftArticle(manifest, articleHtml, cover)
+    : undefined;
 
   return {
     ok: true,
@@ -1067,10 +1080,17 @@ export async function uploadWorkspaceImageFromChatGPTFile(input: {
     baseDir: getChatGPTAssetsBaseDir(),
     workspaceDir,
     articleHtml,
+    draftArticle,
     inlineImages: assets.filter(asset => asset.wechatUrl),
-    cover: assets.find(asset => asset.role === 'cover'),
+    cover,
     assets,
     failed: [],
+    nextTool: {
+      name: 'wechat_get_article_workspace',
+      arguments: {
+        directoryId: input.directoryId,
+      },
+    },
   };
 }
 
@@ -1088,6 +1108,10 @@ export async function getArticleWorkspace(directoryId: string): Promise<ChatGPTW
     ? await fs.readFile(articleHtmlPath, 'utf8')
     : undefined;
   const cover = assets.find(asset => asset.role === 'cover');
+  const manifest = await readWorkspaceManifest(directoryId);
+  const draftArticle = manifest && articleHtml
+    ? buildDraftArticle(manifest, articleHtml, cover)
+    : undefined;
 
   return {
     ok: true,
@@ -1097,9 +1121,16 @@ export async function getArticleWorkspace(directoryId: string): Promise<ChatGPTW
     baseDir: getChatGPTAssetsBaseDir(),
     workspaceDir,
     articleHtml,
+    draftArticle,
     inlineImages: assets.filter(asset => asset.wechatUrl),
     cover,
     assets,
     failed: [],
+    nextTool: {
+      name: 'wechat_get_article_workspace',
+      arguments: {
+        directoryId,
+      },
+    },
   };
 }

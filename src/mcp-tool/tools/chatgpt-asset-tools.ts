@@ -8,6 +8,7 @@ import {
   uploadWorkspaceImageFromChatGPTFile,
   type ChatGPTFileRef,
   type ChatGPTAssetRole,
+  type ChatGPTWorkspaceResult,
 } from '../../utils/chatgpt-assets.js';
 import { logger } from '../../utils/logger.js';
 import {
@@ -26,7 +27,7 @@ const chatGPTFileRefSchema = z.object({
 const processBundleSchema = z.object({
   directoryId: z.string().optional().describe('MCP 返回的不透明目录 ID。首次上传可为空，后续重传同一主题必须传入。'),
   topicSlug: z.string().optional().describe('ChatGPT 为当前主题生成的人类可读 slug，仅用于展示和记录，不作为真实路径。'),
-  bundle: chatGPTFileRefSchema.describe('ChatGPT uploadFile 返回的 ZIP 文件引用，必须包含 download_url。'),
+  bundle: chatGPTFileRefSchema.describe('Widget 上传 ZIP 后得到的文件引用，必须包含 download_url。'),
 });
 
 const uploadWorkspaceImageSchema = z.object({
@@ -159,10 +160,130 @@ function errorResult(error: unknown): WechatToolResult {
   };
 }
 
+type AssetNextStepEvent = 'bundle_processed' | 'single_image_replaced' | 'workspace_read';
+
+function getDraftArticleMissingReasons(result: ChatGPTWorkspaceResult): string[] {
+  const missing: string[] = [];
+
+  if (!result.draftArticle) {
+    missing.push('缺少 draftArticle。请先确认素材包里 manifest.title、article 文件和封面图都有效。');
+    return missing;
+  }
+
+  if (!result.draftArticle.content) {
+    missing.push('draftArticle.content 为空，不能创建或更新公众号草稿。');
+  }
+
+  if (!result.draftArticle.thumbMediaId) {
+    missing.push('封面图缺少 thumbMediaId。请检查 cover 图片是否上传成功。');
+  }
+
+  return missing;
+}
+
+function buildPostAssetNextStepGuide(
+  result: ChatGPTWorkspaceResult,
+  event: AssetNextStepEvent,
+): Record<string, unknown> {
+  const missingReasons = getDraftArticleMissingReasons(result);
+  const draftReady = missingReasons.length === 0;
+
+  return {
+    event,
+    status: draftReady ? 'ready_for_user_draft_decision' : 'needs_user_or_asset_fix',
+    directoryId: result.directoryId,
+    revision: result.revision,
+    draftReady,
+    missingReasons,
+    requiredFirstTool: {
+      name: 'wechat_get_article_workspace',
+      arguments: {
+        directoryId: result.directoryId,
+      },
+      reason: '创建或更新草稿前必须读取最新工作区，确保拿到替换图片后的 draftArticle。',
+    },
+    createNewDraft: {
+      when: '用户明确选择“创建新草稿”，或 Widget 发来的下一步指令要求创建新草稿。',
+      tool: 'wechat_draft',
+      argumentsShape: {
+        action: 'add',
+        articles: ['使用 wechat_get_article_workspace 返回的 structuredContent.draftArticle'],
+      },
+    },
+    updateExistingDraft: {
+      when: '用户明确选择“更新原草稿”，或 Widget 发来的下一步指令要求更新原草稿。',
+      required: '必须已有原草稿 mediaId；如果上下文和 Widget 输入中都没有 mediaId，先询问用户，不要创建新草稿替代。',
+      tool: 'wechat_draft',
+      argumentsShape: {
+        action: 'update',
+        mediaId: '原草稿 mediaId',
+        index: 0,
+        article: '使用 wechat_get_article_workspace 返回的 structuredContent.draftArticle',
+      },
+    },
+    mustNotDo: [
+      '不要调用 wechat_publish，除非用户明确说发布。',
+      '不要再走分片上传、prepare upload、base64 上传或 /mnt/data 本地路径上传。',
+      '不要在用户选择“更新原草稿”时创建新草稿。',
+      '不要跳过 wechat_get_article_workspace 直接复用旧的 draftArticle。',
+    ],
+    userFacingInstruction: draftReady
+      ? '素材已经准备好。请让用户在 Widget 中选择“创建新草稿”或“更新原草稿”，再按对应路径调用 wechat_draft。'
+      : '素材还不能安全创建或更新草稿。请先根据 missingReasons 修复素材或询问用户。',
+  };
+}
+
+function buildPostAssetNextStepText(
+  result: ChatGPTWorkspaceResult,
+  event: AssetNextStepEvent,
+): string {
+  const guide = buildPostAssetNextStepGuide(result, event);
+  const missingReasons = guide.missingReasons as string[];
+  const actionText = event === 'bundle_processed'
+    ? '素材包已处理完成'
+    : event === 'single_image_replaced'
+      ? '单图上传/替换已完成'
+      : '已读取最新工作区';
+
+  return [
+    `${actionText}。`,
+    `directoryId: ${result.directoryId}`,
+    `revision: ${result.revision}`,
+    '',
+    '下一步请严格这样走：',
+    '1. 不要直接创建草稿，也不要重新走图片上传流程。',
+    '2. 先调用 wechat_get_article_workspace，参数只传当前 directoryId，读取最新 draftArticle。',
+    '3. 如果用户选择“创建新草稿”，再调用 wechat_draft action=add，articles 使用最新 draftArticle。',
+    '4. 如果用户选择“更新原草稿”，必须拿到原草稿 mediaId，再调用 wechat_draft action=update，index 默认 0，article 使用最新 draftArticle。',
+    '5. 不要调用 wechat_publish；不要使用分片上传、prepare upload、base64 上传或 /mnt/data 路径。',
+    missingReasons.length
+      ? `当前还不能安全进入草稿步骤，缺少：${missingReasons.join('；')}`
+      : '当前素材已具备进入草稿步骤的基础条件，等待用户选择创建新草稿或更新原草稿。',
+  ].join('\n');
+}
+
+function withPostAssetNextStepGuide(
+  result: ChatGPTWorkspaceResult,
+  event: AssetNextStepEvent,
+): Record<string, unknown> {
+  return {
+    ...result,
+    nextStepGuide: buildPostAssetNextStepGuide(result, event),
+    nextTool: {
+      name: 'wechat_get_article_workspace',
+      arguments: {
+        directoryId: result.directoryId,
+      },
+      reason: '先读取最新工作区，再根据用户选择创建新草稿或更新原草稿。',
+    },
+  } as unknown as Record<string, unknown>;
+}
+
 async function handleOpenAssetBundleUpload(args: unknown): Promise<WechatToolResult> {
   const params = z.object({
     directoryId: z.string().optional(),
     topicSlug: z.string().optional(),
+    draftMediaId: z.string().optional(),
   }).parse(args || {});
   const ticket = createImageUploadTicket({ maxBytes: getMaxChatGPTAssetZipBytes() });
   const uploadUrl = buildImageUploadTicketUrl(ticket.token, CHATGPT_BUNDLE_UPLOAD_ENDPOINT);
@@ -183,12 +304,15 @@ async function handleOpenAssetBundleUpload(args: unknown): Promise<WechatToolRes
     ok: true,
     directoryId: params.directoryId,
     topicSlug: params.topicSlug,
+    draftMediaId: params.draftMediaId,
     workflow: {
       primaryUploadTool: 'wechat_process_article_bundle_from_chatgpt_file',
       singleImageTool: 'wechat_upload_workspace_image_from_chatgpt_file',
       requiredBundleFiles: ['manifest.json', 'article.md 或 article.html', 'images/*'],
       imageReferenceRule: '正文必须使用 asset://image/<assetId>，manifest.images[].id 必须与正文引用一一对应。',
       directoryRule: '首次上传后会返回 directoryId，后续重传 ZIP 或替换单图必须继续传该 directoryId。',
+      draftDecisionRule: '用户在 Widget 中确认图片后，可以选择让 ChatGPT 创建新草稿，或带着已有草稿 media_id 更新原草稿。',
+      chatGPTFileLibraryRule: '如果 Widget 支持 ChatGPT 文件库选择器，用户可以直接从 ChatGPT 文件库选择 ZIP 或替换图片；不支持时再使用本地上传兜底。',
     },
   }, '已打开 ChatGPT 公众号素材包上传界面。', bundleUpload ? { chatgptBundleUpload: bundleUpload } : undefined);
 }
@@ -208,6 +332,8 @@ async function handleGetChatGPTArticleWorkflow(args: unknown): Promise<WechatToo
       '必须生成一张且只能一张 role=cover 的封面图。',
       '把 manifest.json、文章文件和 images/ 目录一起打包成 ZIP。',
       '打开上传 Widget 前，先确认 ZIP 根目录直接包含 manifest.json，不要再套一层父目录。',
+      '打开 Widget 后，如果 ChatGPT 文件库里已经有生成好的 ZIP，优先让用户点击“从 ChatGPT 文件库选择 ZIP”；只有文件库选择器不可用时才让用户下载后本地上传。',
+      '用户在 Widget 中替换图片后，如果点击“创建新草稿”，后续使用 wechat_draft action=add；如果点击“更新原草稿”，后续使用 wechat_draft action=update，并使用用户提供或上下文中已有的 media_id。',
     ],
     recommendedFlow: [
       {
@@ -233,7 +359,7 @@ async function handleGetChatGPTArticleWorkflow(args: unknown): Promise<WechatToo
       {
         step: 5,
         actor: 'Widget/MCP',
-        action: 'Widget 上传 ZIP 后调用 wechat_process_article_bundle_from_chatgpt_file。MCP 会创建或覆盖 directoryId 对应的主题目录。',
+        action: 'Widget 从 ChatGPT 文件库选择 ZIP 或本地上传 ZIP 后，调用 wechat_process_article_bundle_from_chatgpt_file。MCP 会创建或覆盖 directoryId 对应的主题目录。',
       },
       {
         step: 6,
@@ -242,11 +368,16 @@ async function handleGetChatGPTArticleWorkflow(args: unknown): Promise<WechatToo
       },
       {
         step: 7,
-        actor: 'ChatGPT',
-        action: '使用返回的 nextTool.arguments 或 draftArticle 调用 wechat_draft 创建草稿。',
+        actor: 'Widget/User',
+        action: '用户检查或替换图片后，在 Widget 中选择“创建新草稿”或“更新原草稿”，按钮只负责给 ChatGPT 发送下一步指令。',
       },
       {
         step: 8,
+        actor: 'ChatGPT',
+        action: '收到 Widget 指令后，先调用 wechat_get_article_workspace 获取最新 draftArticle；创建新草稿用 wechat_draft action=add，更新原草稿用 action=update。',
+      },
+      {
+        step: 9,
         actor: 'ChatGPT',
         action: '同一主题后续重传 ZIP、替换单图、查看状态、创建草稿时都继续传 MCP 返回的 directoryId。',
       },
@@ -318,12 +449,10 @@ async function handleProcessArticleBundle(
       bundle: params.bundle as ChatGPTFileRef,
     }, apiClient);
 
-    return toolResult(result as unknown as Record<string, unknown>, [
-      '素材包处理完成。',
-      `directoryId: ${result.directoryId}`,
-      `revision: ${result.revision}`,
-      '后续重传 ZIP、替换单图、查看状态或创建草稿都必须继续传这个 directoryId。',
-    ].join('\n'));
+    return toolResult(
+      withPostAssetNextStepGuide(result, 'bundle_processed'),
+      buildPostAssetNextStepText(result, 'bundle_processed'),
+    );
   } catch (error) {
     logger.error('wechat_process_article_bundle_from_chatgpt_file failed:', error);
     return errorResult(error);
@@ -343,12 +472,10 @@ async function handleUploadWorkspaceImage(
       file: params.file as ChatGPTFileRef,
     }, apiClient);
 
-    return toolResult(result as unknown as Record<string, unknown>, [
-      '单图上传/替换完成。',
-      `directoryId: ${result.directoryId}`,
-      `revision: ${result.revision}`,
-      '正文图片请使用返回的 assetId -> wechatUrl 映射，封面图请使用 mediaId。',
-    ].join('\n'));
+    return toolResult(
+      withPostAssetNextStepGuide(result, 'single_image_replaced'),
+      buildPostAssetNextStepText(result, 'single_image_replaced'),
+    );
   } catch (error) {
     logger.error('wechat_upload_workspace_image_from_chatgpt_file failed:', error);
     return errorResult(error);
@@ -360,7 +487,10 @@ async function handleGetArticleWorkspace(args: unknown): Promise<WechatToolResul
     const params = getWorkspaceSchema.parse(args || {});
     const result = await getArticleWorkspace(params.directoryId);
 
-    return toolResult(result as unknown as Record<string, unknown>, '已读取 ChatGPT 文章工作区。');
+    return toolResult(
+      withPostAssetNextStepGuide(result, 'workspace_read'),
+      buildPostAssetNextStepText(result, 'workspace_read'),
+    );
   } catch (error) {
     logger.error('wechat_get_article_workspace failed:', error);
     return errorResult(error);
@@ -371,6 +501,7 @@ const workspaceOutputSchema = {
   ok: z.boolean(),
   directoryId: z.string().optional(),
   topicSlug: z.string().optional(),
+  draftMediaId: z.string().optional(),
   revision: z.number().optional(),
   articleHtml: z.string().optional(),
   draftArticle: z.record(z.unknown()).optional(),
@@ -378,6 +509,8 @@ const workspaceOutputSchema = {
   cover: z.record(z.unknown()).optional(),
   assets: z.array(z.record(z.unknown())).optional(),
   failed: z.array(z.record(z.unknown())).optional(),
+  workflow: z.record(z.unknown()).optional(),
+  nextStepGuide: z.record(z.unknown()).optional(),
   nextTool: z.record(z.unknown()).optional(),
   error: z.string().optional(),
 };
@@ -421,12 +554,15 @@ export const openAssetBundleUploadTool: McpTool = {
   title: '打开公众号素材包上传',
   description: [
     'Use this when the user is working in ChatGPT and needs to upload a ZIP bundle for a WeChat Official Account article.',
-    'This render tool opens the upload widget. The widget uploads the ZIP with window.openai.uploadFile, then calls wechat_process_article_bundle_from_chatgpt_file.',
+    'This render tool opens the upload widget. The widget uploads the ZIP directly to the MCP signed upload endpoint, then calls wechat_process_article_bundle_from_chatgpt_file.',
+    'The widget can also pick ZIPs or replacement images from the ChatGPT file library with window.openai.selectFiles when that helper is available.',
+    'The widget lets the user select a specific asset from the returned asset list, replace that single image, and send a follow-up instruction to either create a new draft or update an existing draft.',
     'Use this as the ChatGPT entry point for article assets so the workflow stays on one directoryId-based workspace.',
   ].join('\n'),
   inputSchema: {
     directoryId: z.string().optional().describe('已有工作区目录 ID。首次上传可为空，继续同一文章主题时传入。'),
     topicSlug: z.string().optional().describe('当前主题 slug，仅用于展示和记录。'),
+    draftMediaId: z.string().optional().describe('已有公众号草稿 media_id。需要在 Widget 中“更新原草稿”时传入；创建新草稿可为空。'),
   },
   outputSchema: workspaceOutputSchema,
   annotations: {

@@ -75,6 +75,12 @@ async function handleDraftOperations(
         }) as any;
 
         return {
+          structuredContent: {
+            ok: true,
+            action: 'add',
+            mediaId: result.media_id,
+            articleCount: articles.length,
+          },
           content: [{
             type: 'text',
             text: `草稿创建成功！\n草稿ID: ${result.media_id}\n包含文章数: ${articles.length}`,
@@ -104,6 +110,12 @@ async function handleDraftOperations(
         }) as any;
 
         return {
+          structuredContent: {
+            ok: true,
+            action: 'update',
+            mediaId,
+            index,
+          },
           content: [{
             type: 'text',
             text: `草稿修改成功！\n草稿ID: ${mediaId}\n文章位置: ${index}`,
